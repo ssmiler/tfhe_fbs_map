@@ -31,8 +31,6 @@ make -f ${OUT_DIR}/makefile_bristol -j $NB_J >> ${OUT_DIR}/bristol.log 2>&1
 python3 build_csv.py -o ${OUT_DIR}/bristol_agg.csv ${OUT_DIR}/bristol/
 
 
-exit
-
 # add execution estimates
 for CSV in `ls ${OUT_DIR}/*_agg.csv`
 do
