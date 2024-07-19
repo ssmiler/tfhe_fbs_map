@@ -83,7 +83,7 @@ class MapToLUTBase:
             # f(x) == 0 == -f(x + fbs_size)
             mode2 = np.all(tt_start == tt_end) and np.all(0 == tt_start)
             # f(x) == 1 == -f(x + fbs_size)
-            mode3 = np.all(tt_start == tt_end) and np.all(0 == tt_start)
+            mode3 = np.all(tt_start == tt_end) and np.all(1 == tt_start)
             return mode1 or mode2 or mode3
         return False
 
