@@ -1,0 +1,3 @@
+blifparser==2.0.1
+bfcl==1.0.1
+pandas

@@ -1,0 +1,184 @@
+diff --git a/compilers/concrete-optimizer/concrete-optimizer/src/noise_estimator/error.rs b/compilers/concrete-optimizer/concrete-optimizer/src/noise_estimator/error.rs
+index 602df013..e418e9e5 100644
+--- a/compilers/concrete-optimizer/concrete-optimizer/src/noise_estimator/error.rs
++++ b/compilers/concrete-optimizer/concrete-optimizer/src/noise_estimator/error.rs
+@@ -14,12 +14,24 @@ pub fn error_probability_of_sigma_scale(sigma_scale: f64) -> f64 {
+ const LEFT_PADDING_BITS: u64 = 1;
+ const RIGHT_PADDING_BITS: u64 = 1;
+ 
+-pub fn fatal_variance_limit(padding_bits: u64, precision: u64, ciphertext_modulus_log: u32) -> f64 {
+-    let no_noise_bits = padding_bits + precision;
++pub fn fatal_variance_limit(
++    padding_bits: u64,
++    precision_bits: u64,
++    ciphertext_modulus_log: u32,
++) -> f64 {
++    let no_noise_bits = padding_bits + precision_bits;
+     let noise_bits: i64 = ciphertext_modulus_log as i64 - i64::try_from(no_noise_bits).unwrap();
+     2_f64.powi(noise_bits as i32)
+ }
+ 
++pub fn fatal_variance_limit_abs(
++    padding_bits: u64,
++    precision: u64,
++    ciphertext_modulus_log: u32,
++) -> f64 {
++    (2_u64.pow(ciphertext_modulus_log - padding_bits as u32) / precision) as f64
++}
++
+ fn safe_variance_bound_from_p_error(
+     fatal_noise_limit: f64,
+     ciphertext_modulus_log: u32,
+@@ -37,12 +49,28 @@ fn safe_variance_bound_from_p_error(
+ }
+ 
+ pub fn safe_variance_bound_2padbits(
++    precision_bits: u64,
++    ciphertext_modulus_log: u32,
++    maximum_acceptable_error_probability: f64,
++) -> f64 {
++    let padding_bits = LEFT_PADDING_BITS + RIGHT_PADDING_BITS;
++    let fatal_noise_limit =
++        fatal_variance_limit(padding_bits, precision_bits, ciphertext_modulus_log);
++    safe_variance_bound_from_p_error(
++        fatal_noise_limit,
++        ciphertext_modulus_log,
++        maximum_acceptable_error_probability,
++    )
++}
++
++pub fn safe_variance_bound_2padbits_abs(
+     precision: u64,
+     ciphertext_modulus_log: u32,
+     maximum_acceptable_error_probability: f64,
+ ) -> f64 {
+     let padding_bits = LEFT_PADDING_BITS + RIGHT_PADDING_BITS;
+-    let fatal_noise_limit = fatal_variance_limit(padding_bits, precision, ciphertext_modulus_log);
++    let fatal_noise_limit =
++        fatal_variance_limit_abs(padding_bits, precision, ciphertext_modulus_log);
+     safe_variance_bound_from_p_error(
+         fatal_noise_limit,
+         ciphertext_modulus_log,
+diff --git a/compilers/concrete-optimizer/concrete-optimizer/src/optimization/atomic_pattern.rs b/compilers/concrete-optimizer/concrete-optimizer/src/optimization/atomic_pattern.rs
+index e98f76bc..830711a4 100644
+--- a/compilers/concrete-optimizer/concrete-optimizer/src/optimization/atomic_pattern.rs
++++ b/compilers/concrete-optimizer/concrete-optimizer/src/optimization/atomic_pattern.rs
+@@ -155,7 +155,7 @@ pub fn optimize_one(
+     // the blind rotate decomposition
+ 
+     let ciphertext_modulus_log = config.ciphertext_modulus_log;
+-    let safe_variance = error::safe_variance_bound_2padbits(
++    let safe_variance = error::safe_variance_bound_2padbits_abs(
+         precision,
+         ciphertext_modulus_log,
+         config.maximum_acceptable_error_probability,
+diff --git a/compilers/concrete-optimizer/v0-parameters/src/lib.rs b/compilers/concrete-optimizer/v0-parameters/src/lib.rs
+index 4a2b3909..db2dfc4d 100644
+--- a/compilers/concrete-optimizer/v0-parameters/src/lib.rs
++++ b/compilers/concrete-optimizer/v0-parameters/src/lib.rs
+@@ -38,11 +38,19 @@ pub const MAX_LWE_DIM: u64 = DEFAUT_DOMAINS.free_glwe.glwe_dimension.end - 1;
+ #[clap(author, version, about, long_about = None)]
+ #[allow(clippy::struct_excessive_bools)]
+ pub struct Args {
+-    #[clap(long, default_value_t = 1, help = "1..16")]
+-    pub min_precision: u64,
++    #[clap(
++        long,
++        default_value_t = 1,
++        help = "Bootstrapping precision i.e. # plaintext message values"
++    )]
++    pub precision: u64,
+ 
+-    #[clap(long, default_value_t = 8, help = "1..16")]
+-    pub max_precision: u64,
++    #[clap(
++        long,
++        default_value_t = 1,
++        help = "Maximal squared norm2 of linear products"
++    )]
++    pub sq_norm2: u64,
+ 
+     #[clap(long, default_value_t = _4_SIGMA)]
+     pub p_error: f64,
+@@ -95,6 +103,9 @@ pub struct Args {
+ 
+     #[clap(long)]
+     pub composable: bool,
++    // pub fn get_precisions() -> RetType {
++    //     unimplemented!();
++    // }
+ }
+ 
+ pub fn all_results(args: &Args) -> Vec<Vec<Option<Solution>>> {
+@@ -112,8 +123,8 @@ pub fn all_results(args: &Args) -> Vec<Vec<Option<Solution>>> {
+         levelled_only_lwe_dimensions: DEFAUT_DOMAINS.free_lwe,
+     };
+ 
+-    let precisions = args.min_precision..=args.max_precision;
+-    let log_norms2: Vec<_> = (0..=31).collect();
++    let precisions = args.precision..=args.precision;
++    let norms2: Vec<_> = (args.sq_norm2..=args.sq_norm2).collect();
+ 
+     // let guard = pprof::ProfilerGuard::new(100).unwrap();
+ 
+@@ -140,10 +151,10 @@ pub fn all_results(args: &Args) -> Vec<Vec<Option<Solution>>> {
+ 
+     precisions_iter
+         .map(|precision| {
+-            log_norms2
++            norms2
+                 .iter()
+-                .map(|&log_norm2| {
+-                    let noise_scale = 2_f64.powi(log_norm2);
++                .map(|&sq_norm2| {
++                    let noise_scale = (sq_norm2 as f64).sqrt();
+                     if args.wop_pbs {
+                         let log_norm = noise_scale.log2();
+                         optimize_wop_atomic_pattern::optimize_one(
+@@ -190,15 +201,15 @@ pub fn compute_print_results(mut writer: impl Write, args: &Args) -> Result<(),
+     let p_error = args.p_error;
+     let security_level = args.security_level;
+ 
+-    let precisions = args.min_precision..=args.max_precision;
+-    let manps: Vec<_> = (0..=31).collect();
++    let precisions = args.precision..=args.precision;
++    let manps: Vec<_> = (args.sq_norm2..=args.sq_norm2).collect();
+     writeln!(writer, "security level: {security_level}")?;
+     writeln!(writer, "target p_error: {p_error:1.1e}")?;
+-    writeln!(writer, "per precision and log norm2:")?;
++    writeln!(writer, "per precision and sq_norm2:")?;
+ 
+     for (precision_i, precision) in precisions.enumerate() {
+         writeln!(writer)?;
+-        writeln!(writer, "  - {precision}: # bits")?;
++        writeln!(writer, "  - {precision}: # divisions")?;
+         let mut no_solution_at = None;
+         for (manp_i, manp) in manps.clone().iter().enumerate() {
+             if let Some(solution) = &all_results[precision_i][manp_i] {
+@@ -208,7 +219,7 @@ pub fn compute_print_results(mut writer: impl Write, args: &Args) -> Result<(),
+                         if manp_i == 0 {
+                             writeln!(
+                                 writer,
+-                                "    -ln2:   k,  N,    n, br_l,br_b, ks_l,ks_b,  cost, p_error"
++                                "    -sq_norm2:   k,  N,    n, br_l,br_b, ks_l,ks_b,  cost, p_error"
+                             )?;
+                         }
+                         writeln!(writer,
+@@ -225,7 +236,7 @@ pub fn compute_print_results(mut writer: impl Write, args: &Args) -> Result<(),
+                         if manp_i == 0 {
+                             writeln!(
+                                 writer,
+-                                "    -ln2:   k,  N,    n, br_l,br_b, ks_l,ks_b, cb_l,cb_b, pp_l,pp_b,  cost, p_error"
++                                "    -sq_norm2:   k,  N,    n, br_l,br_b, ks_l,ks_b, cb_l,cb_b, pp_l,pp_b,  cost, p_error"
+                             )?;
+                         }
+                         writeln!(writer,
+@@ -251,7 +262,7 @@ pub fn compute_print_results(mut writer: impl Write, args: &Args) -> Result<(),
+             } else {
+                 writeln!(
+                     writer,
+-                    "    # no solution starting from log norm2 = {no_solution_at}"
++                    "    # no solution starting from sq_norm2 = {no_solution_at}"
+                 )?;
+             }
+         }
