@@ -3,6 +3,7 @@ import random
 import argparse
 import time
 import logging
+import traceback
 
 from bit_exec_env import *
 import map_to_fbs
@@ -101,7 +102,7 @@ if __name__ == '__main__':
     parser.add_argument("--strict_fbs_size", action="store_true",
                         help="Do not use anti-cyclic ring property")
     parser.add_argument("--output", help="file to output mapped circuit")
-    parser.add_argument("--max_tt_size", default=2**16,
+    parser.add_argument("--max_tt_size", default=16, type=int,
                         help="maximal truth table size before bootstrapping")
     parser.add_argument("--verbose", "-v", action="count", default=0)
 
@@ -120,16 +121,13 @@ if __name__ == '__main__':
     args.max_fbs_size = max_fbs_size
 
     match args.mapper:
-        case "basic": mapper = map_to_fbs.MapToLUTBasic()
-        case "naive":
-            mapper = map_to_fbs.MapToLUTNaive(
-                fbs_size=fbs_size,
-                max_fbs_size=max_fbs_size)
-        case "search":
-            mapper = map_to_fbs.MapToLUTSearch(
+        case "basic": mapper = map_to_fbs.MapToFBSBasic()
+        case cone_merger:
+            mapper = map_to_fbs.MapToFBSHeur(
                 fbs_size=fbs_size,
                 max_fbs_size=max_fbs_size,
-                max_truth_table_size=args.max_tt_size)
+                max_truth_table_size=args.max_tt_size,
+                cone_merger=cone_merger)
 
     match args.type:
         case "blif": bit_env = parse_blif(args.filename)
@@ -144,7 +142,12 @@ if __name__ == '__main__':
     # print(bit_env.stats())
 
     start = time.time()
-    lut_env = mapper.map(bit_env)
+    try:
+        lut_env = mapper.map(bit_env)
+    except Exception as e:
+        logging.critical(traceback.format_exc())
+        sys.exit()
+
     lut_env.remove_dangling_nodes()
     duration = time.time() - start
 

@@ -49,7 +49,7 @@ BENCHES+=" benchmarks/iscas89/s838.bench"
 BENCHES+=" benchmarks/iscas89/s9234.bench"
 BENCHES+=" benchmarks/iscas89/s953.bench"
 
-FBS_SIZES=$(seq 2 32)
+FBS_SIZES=$(seq 3 32)
 
 MAPPERS="naive search"
 
@@ -101,14 +101,16 @@ for BLIF in $BLIFS
 do
     BENCH=$(basename -- "$BLIF" .blif)
 
-    MAPPER=basic
     FBS_SIZE=2
-    OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
-    LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
-    echo "$OUT $LOG: $BLIF | $OUTPUT_DIR" >> Makefile
-    echo -e "\tpython3 map_circuit.py $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
-    echo >> Makefile
-    ALL+=" $OUT"
+    for MAPPER in "basic" "search"
+    do
+        OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
+        LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
+        echo "$OUT $LOG: $BLIF | $OUTPUT_DIR" >> Makefile
+        echo -e "\tpython3 map_circuit.py $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
+        echo >> Makefile
+        ALL+=" $OUT"
+    done
 
     for FBS_SIZE in $FBS_SIZES
     do

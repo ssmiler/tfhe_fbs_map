@@ -30,11 +30,10 @@ BENCHES+=" benchmarks/bristol/AES-non-expanded.txt"
 # BENCHES+=" benchmarks/bristol/sha256.txt"
 # BENCHES+=" benchmarks/bristol/sha512.txt"
 
-FBS_SIZES=$(seq 2 16)
+FBS_SIZES=$(seq 3 16)
 
 MAPPERS="naive search"
 
-BENCH_XAG_DIR=benchmarks_xag/bristol
 OUTPUT_DIR=outputs/bristol
 
 rm -f Makefile
@@ -57,14 +56,16 @@ for BENCH in $BENCHES
 do
     BASE=$(basename -- "$BENCH" .txt)
 
-    MAPPER=basic
     FBS_SIZE=2
-    OUT="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.fbs"
-    LOG="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.log"
-    echo "$OUT $LOG: $BENCH | $OUTPUT_DIR" >> Makefile
-    echo -e "\tpython3 map_circuit.py $BENCH --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --type bristol > $LOG 2>&1" >> Makefile
-    echo >> Makefile
-    ALL+=" $OUT"
+    for MAPPER in "basic" "search"
+    do
+        OUT="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.fbs"
+        LOG="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.log"
+        echo "$OUT $LOG: $BENCH | $OUTPUT_DIR" >> Makefile
+        echo -e "\tpython3 map_circuit.py $BENCH --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --type bristol > $LOG 2>&1" >> Makefile
+        echo >> Makefile
+        ALL+=" $OUT"
+    done
 
     for FBS_SIZE in $FBS_SIZES
     do
@@ -79,20 +80,6 @@ do
         done
     done
 
-done
-
-BLIF="aes_128"
-for FBS_SIZE in $(seq 3 16)
-do
-    for MAPPER in $MAPPERS
-    do
-        OUT="${OUTPUT_DIR}/${BASE}_${FBS_SIZE}_${MAPPER}_strict.fbs"
-        LOG="${OUTPUT_DIR}/${BASE}_${FBS_SIZE}_${MAPPER}_strict.log"
-        echo "$OUT $LOG: $BENCH | $OUTPUT_DIR" >> Makefile
-        echo -e "\tpython3 map_circuit.py $BENCH --strict_fbs_size --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --type bristol > $LOG 2>&1" >> Makefile
-        echo >> Makefile
-        ALL+=" $OUT"
-    done
 done
 
 echo ".DEFAULT_GOAL := all" >> Makefile

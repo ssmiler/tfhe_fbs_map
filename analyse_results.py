@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import itertools as it
 
@@ -29,7 +30,7 @@ def f2(df):
     t_ref = df1.loc[df1.mapper == "basic", ["total_cost", "nb_bootstrap", "bench"]].set_index("bench")
 
     def g(df1):
-        t = df1.groupby("bench").apply(lambda d: d.iloc[d.total_cost.argmin()].loc[["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"]])
+        t = df1.groupby("bench").apply(lambda d: d.iloc[d.total_cost.argmin()].loc[["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"]], include_groups=False)
         t["ratio_cost"] = t_ref["total_cost"] / t["total_cost"]
         t["ratio_boots"] = (t["nb_bootstrap"] / t_ref["nb_bootstrap"] - 1)*100
         t["FBS size"] = t.apply(lambda e: f"{int(e.fbs_size)} ({int(e.max_lut_size):2})", axis = 1)
@@ -57,7 +58,7 @@ def f2b(df):
     t_ref = df1.loc[df1.mapper == "basic", ["total_cost", "nb_bootstrap", "bench"]].set_index("bench")
 
     def g(df1):
-        t = df1.groupby("bench").apply(lambda d: d.iloc[d.total_cost.argmin()].loc[["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"]])
+        t = df1.groupby("bench").apply(lambda d: d.iloc[d.total_cost.argmin()].loc[["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"]], include_groups=False)
         t["ratio_cost"] = (t["total_cost"] / t_ref["total_cost"] - 1) * 100
         t["ratio_boots"] = (t["nb_bootstrap"] / t_ref["nb_bootstrap"] - 1) * 100
         t["FBS size"] = t.apply(lambda e: f"{int(e.fbs_size)} ({int(e.max_lut_size)})", axis = 1)
@@ -85,7 +86,7 @@ def f4(df):
     t_ref = df1.loc[df1.mapper == "basic", ["nb_bootstrap", "bench"]].set_index("bench")
 
     def g(df1):
-        t = df1.groupby("bench").apply(lambda d: d.iloc[d.nb_bootstrap.argmin()].loc[["nb_bootstrap", "fbs_size", "max_lut_size"]])
+        t = df1.groupby("bench").apply(lambda d: d.iloc[d.nb_bootstrap.argmin()].loc[["nb_bootstrap", "fbs_size", "max_lut_size"]], include_groups=False)
         t["ratio_boots"] = t_ref["nb_bootstrap"] / t["nb_bootstrap"]
         t["FBS size"] = t.apply(lambda e: f"{int(e.fbs_size)} ({int(e.max_lut_size):2})", axis = 1)
         t.drop(["nb_bootstrap", "fbs_size", "max_lut_size"], inplace=True, axis=1)
@@ -117,18 +118,9 @@ bench_arith = ["adder", "bar", "div", "hyp", "log2",
 bench_ctrl = ["arbiter", "cavlc", "ctrl", "dec", "i2c",
               "int2float", "mem_ctrl", "priority", "router", "voter"]
 
-# df1 = f2(df)
-# df1 = df1.loc[bench_arith + bench_ctrl]
-# df1.index = df1.index.str.replace("_", "\_")
-# df1.index = "\\textsf{" + df1.index + "}"
-# df1.loc["avg."] = df1.mean(numeric_only = True)
-
-# s = df1.loc[:, df1.columns.get_level_values(1)==df1.columns[0][1]].applymap(lambda e: f"${e:.2f}\\times$")
-# df1.loc[:, df1.columns.get_level_values(1)==df1.columns[0][1]] = s
-
-# s = df1.loc[:, df1.columns.get_level_values(1)==df1.columns[1][1]].applymap(lambda e: f"${e:2.0f}~\%$")
-# df1.loc[:, df1.columns.get_level_values(1)==df1.columns[1][1]] = s
-# print(df1.to_latex(float_format = "%.2f", na_rep = ""))
+e = df[df.mapper == "basic"].copy()
+e.mapper = "naive"
+df = pd.concat((df, e))
 
 df1 = f2b(df)
 df1 = df1.loc[bench_arith + bench_ctrl]
@@ -136,13 +128,20 @@ df1.index = df1.index.str.replace("_", "\_")
 df1.index = "\\textsf{" + df1.index + "}"
 df1.loc["avg."] = df1.mean(numeric_only = True)
 
-s = df1.loc[:, df1.columns.get_level_values(1)==df1.columns[0][1]].applymap(lambda e: f"${e:2.0f}\%$" if e else "")
-df1.loc[:, df1.columns.get_level_values(1)==df1.columns[0][1]] = s
+df2 = df1.astype(str)
+df2.iloc[:, [0,1,3,4]] = ""
 
-s = df1.loc[:, df1.columns.get_level_values(1)==df1.columns[1][1]].applymap(lambda e: f"${e:2.0f}\%$" if e else "")
-df1.loc[:, df1.columns.get_level_values(1)==df1.columns[1][1]] = s
+idx = df1.iloc[:, 0] > -0.5
+df2.iloc[:, [0, 1]] = df1.iloc[:, [0, 1]].map(lambda e: f"${e:2.0f}\%$")
+df2.iloc[idx, [0, 1, 2]] = ""
 
-print(df1.to_latex(na_rep = ""))
+idx = df1.iloc[:, 3] > -0.5
+df2.iloc[:, [3, 4]] = df1.iloc[:, [3, 4]].map(lambda e: f"${e:2.0f}\%$")
+df2.iloc[idx, [3, 4, 5]] = ""
+
+df2.iloc[-1, [2,5]] = ""
+
+print(df2.to_latex())
 
 
 
@@ -152,13 +151,13 @@ print(df1.to_latex(na_rep = ""))
 df1 = df
 df1 = df1[df1.mapper == "naive"]
 df1 = df1[df1.bench.isin(bench_arith + bench_ctrl)]
-d1 = df1.groupby("fbs_size").apply(lambda d: (d.time / d.nb_bootstrap.iloc[0]).mean())*1000
+d1 = df1.groupby("fbs_size").apply(lambda d: (d.time / d.nb_bootstrap.iloc[0]).mean(), include_groups=False)*1000
 plt.plot(d1.index, d1.values, ".-", label="naive")
 
 df1 = df
 df1 = df1[df1.mapper == "search"]
 df1 = df1[df1.bench.isin(bench_arith + bench_ctrl)]
-d1 = df1.groupby("fbs_size").apply(lambda d: (d.time / d.nb_bootstrap.iloc[0]).mean())*1000
+d1 = df1.groupby("fbs_size").apply(lambda d: (d.time / d.nb_bootstrap.iloc[0]).mean(), include_groups=False)*1000
 plt.plot(d1.index, d1.values, ".-", label="search")
 
 plt.legend()
@@ -193,19 +192,22 @@ df1 = f4(df)
 df1.index = df1.index.str.slice(stop = -4)
 df1.sort_index(key = lambda e: e.str.slice(start=1).astype(int), inplace=True)
 df1 = df1.join(t_autohog, on = "bench")
-df1.loc["avg."] = df1.mean(numeric_only = True)
 df1.index = "\\textsf{" + df1.index + "}"
+df1.loc["avg."] = df1.mean(numeric_only = True)
 
-s = df1.loc[:, df1.columns.get_level_values(1)=='speedup'].applymap(lambda e: "-" if np.isnan(e) else f"{e:.2f}\\times")
-df1.loc[:, df1.columns.get_level_values(1)=='speedup'] = s
-for i in range(df1.shape[0]):
-    m = 10000 if df1.iloc[i, 2] == "-" else df1.iloc[i, [0, 2]].max()
+df2 = df1.astype(str)
+df2.iloc[:, [0,2]] = ""
+
+s = df1.loc[:, df1.columns.get_level_values(1)=='speedup'].map(lambda e: "-" if np.isnan(e) else f"{e:.2f}\\times")
+df2.loc[:, df2.columns.get_level_values(1)=='speedup'] = s
+for i in range(df2.shape[0]):
+    m = 10000 if df2.iloc[i, 2] == "-" else df2.iloc[i, [0, 2]].max()
     for j in [0, 2]:
-        if df1.iloc[i, j] == m:
-            df1.iloc[i, j] = f"\\mathbf{{{df1.iloc[i, j]}}}"
-        df1.iloc[i, j] = f"${df1.iloc[i, j]}$"
+        if df2.iloc[i, j] == m:
+            df2.iloc[i, j] = f"\\mathbf{{{df2.iloc[i, j]}}}"
+        df2.iloc[i, j] = f"${df2.iloc[i, j]}$"
 
-print(df1.to_latex(na_rep = ""))
+print(df2.to_latex())
 
 
 # iscas89
@@ -244,23 +246,25 @@ t_autohog.columns = pd.MultiIndex.from_tuples(it.product(["AutoHoG"], t_autohog.
 
 df = pd.read_csv("iscas89_agg_est.csv")
 df = add_best_cols(df)
-df1 = f4(df[~df.bench.str.endswith("-xag")])
+df1 = f4(df)
+df1.sort_index(key = lambda e: e.str.slice(start=1).astype(int), inplace=True)
 df1 = df1.join(t_autohog, on = "bench")
+df1.index = "\\textsf{" + df1.index + "}"
 df1.loc["avg."] = df1.mean(numeric_only = True)
 
-s = df1.loc[:, df1.columns.get_level_values(1)=='speedup'].applymap(lambda e: "-" if np.isnan(e) else f"{e:.2f}\\times")
-df1.loc[:, df1.columns.get_level_values(1)=='speedup'] = s
-for i in range(df1.shape[0]):
-    m = 10000 if df1.iloc[i, 2] == "-" else df1.iloc[i, [0, 2]].max()
-    for j in [0, 2]:
-        if df1.iloc[i, j] == m:
-            df1.iloc[i, j] = f"\\mathbf{{{df1.iloc[i, j]}}}"
-        df1.iloc[i, j] = f"${df1.iloc[i, j]}$"
+df2 = df1.astype(str)
+df2.iloc[:, [0,2]] = ""
 
-d1 = df1.iloc[:-1].sort_index(key = lambda e: e.str.slice(start=1).astype(int))
-d1.index = "\\textsf{" + d1.index + "}"
-df1 = pd.concat((d1, df1.iloc[-1:]))
-print(df1.to_latex(float_format = "%.2f", na_rep = ""))
+s = df1.loc[:, df1.columns.get_level_values(1)=='speedup'].map(lambda e: "-" if np.isnan(e) else f"{e:.2f}\\times")
+df2.loc[:, df2.columns.get_level_values(1)=='speedup'] = s
+for i in range(df2.shape[0]):
+    m = 10000 if df2.iloc[i, 2] == "-" else df2.iloc[i, [0, 2]].max()
+    for j in [0, 2]:
+        if df2.iloc[i, j] == m:
+            df2.iloc[i, j] = f"\\mathbf{{{df2.iloc[i, j]}}}"
+        df2.iloc[i, j] = f"${df2.iloc[i, j]}$"
+
+print(df2.to_latex())
 
 
 
@@ -270,8 +274,8 @@ df = pd.read_csv("bristol_agg_est.csv")
 df = add_best_cols(df)
 
 df1 = df
-df1 = df1[df1.bench == "AES-non-expanded"]
-# df1 = df1[df1.bench == "aes_128"]
+# df1 = df1[df1.bench == "AES-non-expanded"]
+df1 = df1[df1.bench == "aes_128"]
 df1 = df1[df1.mapper == "search"]
 df1 = df1[df1.fbs_size <= 16]
 d = df1[df1.strict_fbs_size == False]
@@ -296,14 +300,14 @@ plt.savefig("aes.pdf")
 df = pd.read_csv("generated_agg_est.csv")
 df = add_best_cols(df)
 
+# trivium/kreyvium
 df1 = df
 df1 = df1[df1.mapper == "search"]
-df1 = df1[df1.fbs_size <= 10]
+df1 = df1[df1.fbs_size <= 12]
 for bench, cnt in zip(["trivium_iter", "kreyvium_iter"], [8, 10]):
     fig = plt.figure()
     gs = fig.add_gridspec(2, hspace=0)
     axs = gs.subplots(sharex=True)
-    # fig, axs = plt.subplots(nrows = 2, sharex = True)
     ax1 = axs[0]
     ax1.set_ylabel('number of bootstraps')
     d = df1[df1.bench == f"{bench}_v1"]
@@ -312,6 +316,7 @@ for bench, cnt in zip(["trivium_iter", "kreyvium_iter"], [8, 10]):
     ax1.plot(d.fbs_size, d.nb_bootstrap, 'g.-', label = "version 2")
     ax1.plot([4], [cnt], 'ro')
     ax1.tick_params(axis='y')
+    ax1.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
 
     ax2 = axs[1]
     ax2.set_xlabel('FBS size (p)')
@@ -327,3 +332,57 @@ for bench, cnt in zip(["trivium_iter", "kreyvium_iter"], [8, 10]):
     fig.legend(ncol = 2)
     plt.savefig(f"{bench}.pdf")
 
+# aes sbox
+df1 = df
+df1 = df1[df1.mapper == "search"]
+df1 = df1[df1.fbs_size <= 14]
+df1 = df1[df1.fbs_size >= 4]
+d = df1[df1.bench == "aes_sbox"]
+
+fig = plt.figure()
+gs = fig.add_gridspec(2, hspace=0)
+axs = gs.subplots(sharex=True)
+ax1 = axs[0]
+ax1.set_ylabel('number of bootstraps')
+ax1.plot(d.fbs_size, d.nb_bootstrap, 'b.-')
+ax1.plot([11], [36], 'ro') # 36 is nb. FBS from Bon et al.
+ax1.tick_params(axis='y')
+ax1.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+
+ax2 = axs[1]
+ax2.set_xlabel('FBS size (p)')
+ax2.set_ylabel('evaluation cost')
+ax2.plot(d.fbs_size, d.total_cost, 'b.-')
+ax2.plot([11], [36 * 69], 'ro') # 69 is the FBS cost with precision 11 and sq-norm2 > 2
+ax2.tick_params(axis='y')
+
+fig.tight_layout()  # otherwise the right y-label is slightly clipped
+fig.legend(ncol = 2)
+plt.savefig(f"aes_sbox.pdf")
+
+# ascon lut
+df1 = df
+df1 = df1[df1.mapper == "search"]
+df1 = df1[df1.fbs_size >= 7]
+d = df1[df1.bench == "ascon_lut"]
+
+fig = plt.figure()
+gs = fig.add_gridspec(2, hspace=0)
+axs = gs.subplots(sharex=True)
+ax1 = axs[0]
+ax1.set_ylabel('number of bootstraps')
+ax1.plot(d.fbs_size, d.nb_bootstrap, 'b.-')
+ax1.plot([17], [5], 'ro') # 5 is nb. FBS from Bon et al.
+ax1.tick_params(axis='y')
+ax1.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+
+ax2 = axs[1]
+ax2.set_xlabel('FBS size (p)')
+ax2.set_ylabel('evaluation cost')
+ax2.plot(d.fbs_size, d.total_cost, 'b.-')
+ax2.plot([17], [5 * 75], 'ro') # 5 is the FBS cost with precision 11 and sq-norm2 > 2
+ax2.tick_params(axis='y')
+
+fig.tight_layout()  # otherwise the right y-label is slightly clipped
+fig.legend(ncol = 2)
+plt.savefig(f"ascon_lut.pdf")
