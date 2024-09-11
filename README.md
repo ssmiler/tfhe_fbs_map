@@ -1,6 +1,6 @@
 # Heuristic for mapping Boolean circuit to TFHE functional bootstrappings
 
-This repository contains the code used in paper (add ref.)
+This repository contains the code used in paper *[A fast heuristic for mapping Boolean circuits to functional bootstrapping](https://eprint.iacr.org/2024/1204)*.
 
 ## Preliminaries
 
