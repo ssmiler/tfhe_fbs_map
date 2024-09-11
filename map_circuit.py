@@ -103,7 +103,7 @@ if __name__ == '__main__':
                         help="Do not use anti-cyclic ring property")
     parser.add_argument("--output", help="file to output mapped circuit")
     parser.add_argument("--max_tt_size", default=16, type=int,
-                        help="maximal truth table size before bootstrapping")
+                        help="maximal truth table size (log2) before bootstrapping")
     parser.add_argument("--verbose", "-v", action="count", default=0)
 
     args = parser.parse_args()
