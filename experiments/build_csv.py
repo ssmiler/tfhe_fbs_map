@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 import ast
 import argparse
+import traceback
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -19,11 +20,13 @@ if __name__ == '__main__':
         print(file)
         with open(file) as f:
             lines = f.readlines()
-            if len(lines):
+            try:
                 last = lines[-1]
                 d = ast.literal_eval(last)
                 d["bench"] = Path(d["filename"]).stem
                 data.append(d)
+            except Exception as e:
+                print(f"Cannot parse file {file}: {traceback.format_exc()}")
 
     df = pd.DataFrame(data)
 

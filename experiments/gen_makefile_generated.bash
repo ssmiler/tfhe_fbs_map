@@ -3,17 +3,18 @@
 # clone and compile abc
 [ -f abc/abc ] || ( echo "Clone and compile abc" && git clone https://github.com/berkeley-abc/abc && cd abc && make -j4 abc ) || exit
 
-# clone EPFL benchmarks
-[ -d benchmarks/epfl ] || ( echo "Clone EPFL circuit benchmark" && git clone https://github.com/lsils/benchmarks benchmarks/epfl ) || exit
+# generate benchmarks
+[ -d benchmarks/generated ] || ( echo "Generating benchmarks" && mkdir -p benchmarks/generated && python3 generate_benchmarks.py --prefix benchmarks/generated ) || exit
 
-BENCHES=$(ls benchmarks/epfl/arithmetic/*.blif)
-BENCHES+=" "$(ls benchmarks/epfl/random_control/*.blif)
+BENCHES=$(ls benchmarks/generated/*.blif)
 
 FBS_SIZES=$(seq 3 16)
 
+MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
+
 MAPPERS="naive search"
 
-OUTPUT_DIR=outputs/epfl
+OUTPUT_DIR=outputs/generated
 
 rm -f Makefile
 ALL=""
@@ -41,7 +42,7 @@ do
         OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
         LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
         echo "$OUT $LOG: $BLIF | $OUTPUT_DIR" >> Makefile
-        echo -e "\tpython3 map_circuit.py $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
+        echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
         echo >> Makefile
         ALL+=" $OUT"
     done
@@ -53,7 +54,7 @@ do
             OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
             LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
             echo "$OUT $LOG: $BLIF | $OUTPUT_DIR" >> Makefile
-            echo -e "\tpython3 map_circuit.py $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
+            echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
             echo >> Makefile
             ALL+=" $OUT"
         done

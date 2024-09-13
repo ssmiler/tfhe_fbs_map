@@ -1,5 +1,6 @@
 import argparse
-from bit_exec_env import *
+import context
+from fbs_mapper.bit_exec_env import *
 
 
 class Bit:

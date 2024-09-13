@@ -3,16 +3,19 @@
 # clone and compile abc
 [ -f abc/abc ] || ( echo "Clone and compile abc" && git clone https://github.com/berkeley-abc/abc && cd abc && make -j4 abc ) || exit
 
-# generate benchmarks
-[ -d benchmarks/generated ] || ( echo "Generating benchmarks" && mkdir -p benchmarks/generated && python3 generate_benchmarks.py --prefix benchmarks/generated ) || exit
+# wget benchmarks
+[ -d benchmarks/iscas85/ ] || ( echo "Wget benchmarks" && wget -nd -r -l1 -A "*.bench" https://pld.ttu.ee/~maksim/benchmarks/iscas85/bench -P benchmarks/iscas85/ ) || exit
 
-BENCHES=$(ls benchmarks/generated/*.blif)
+BENCHES=$(ls benchmarks/iscas85/*.bench)
 
-FBS_SIZES=$(seq 3 16)
+FBS_SIZES=$(seq 3 32)
+
+MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
 
 MAPPERS="naive search"
 
-OUTPUT_DIR=outputs/generated
+BENCH_XAG_DIR=outputs/benchmarks_xag/iscas85
+OUTPUT_DIR=outputs/iscas85
 
 rm -f Makefile
 ALL=""
@@ -24,13 +27,34 @@ echo -e "\t@echo" >> Makefile
 echo -e "\t@echo" >> Makefile
 echo >> Makefile
 
+# targets for mapping bench circuits to XAGs
+echo "$BENCH_XAG_DIR:" >> Makefile
+echo -e "\t@mkdir -p $BENCH_XAG_DIR" >> Makefile
+echo >> Makefile
+ALL+=" $BENCH_XAG_DIR"
+
+BLIFS=""
+for BENCH in $BENCHES
+do
+    BENCH_BASE=$(basename -- "$BENCH" .bench)
+    BLIF_XAG="$BENCH_XAG_DIR/${BENCH_BASE}-xag.blif"
+
+    echo "$BLIF_XAG: $BENCH | $BENCH_XAG_DIR" >> Makefile
+    echo -e "\t./abc/abc -c \"read_bench $BENCH; read_library lib.genlib; ps; map; ps; unmap; ps; write_blif $BLIF_XAG\"" >> Makefile
+    echo >> Makefile
+
+    BLIFS+=" $BLIF_XAG"
+done
+ALL+=" $BLIFS"
+
+
 # targets for mapping bench circuits to FBSs
 echo "$OUTPUT_DIR:" >> Makefile
 echo -e "\t@mkdir -p $OUTPUT_DIR" >> Makefile
 echo >> Makefile
 ALL+=" $OUTPUT_DIR"
 
-for BLIF in $BENCHES
+for BLIF in $BLIFS
 do
     BENCH=$(basename -- "$BLIF" .blif)
 
@@ -40,7 +64,7 @@ do
         OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
         LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
         echo "$OUT $LOG: $BLIF | $OUTPUT_DIR" >> Makefile
-        echo -e "\tpython3 map_circuit.py $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
+        echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
         echo >> Makefile
         ALL+=" $OUT"
     done
@@ -52,7 +76,7 @@ do
             OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
             LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
             echo "$OUT $LOG: $BLIF | $OUTPUT_DIR" >> Makefile
-            echo -e "\tpython3 map_circuit.py $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
+            echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
             echo >> Makefile
             ALL+=" $OUT"
         done

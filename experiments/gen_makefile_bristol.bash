@@ -32,6 +32,8 @@ BENCHES+=" benchmarks/bristol/AES-non-expanded.txt"
 
 FBS_SIZES=$(seq 3 16)
 
+MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
+
 MAPPERS="naive search"
 
 OUTPUT_DIR=outputs/bristol
@@ -62,7 +64,7 @@ do
         OUT="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.fbs"
         LOG="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.log"
         echo "$OUT $LOG: $BENCH | $OUTPUT_DIR" >> Makefile
-        echo -e "\tpython3 map_circuit.py $BENCH --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --type bristol > $LOG 2>&1" >> Makefile
+        echo -e "\tpython3 $MAP_CIRCUIT_PY $BENCH --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --type bristol > $LOG 2>&1" >> Makefile
         echo >> Makefile
         ALL+=" $OUT"
     done
@@ -74,7 +76,7 @@ do
             OUT="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.fbs"
             LOG="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.log"
             echo "$OUT $LOG: $BENCH | $OUTPUT_DIR" >> Makefile
-            echo -e "\tpython3 map_circuit.py $BENCH --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --type bristol > $LOG 2>&1" >> Makefile
+            echo -e "\tpython3 $MAP_CIRCUIT_PY $BENCH --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --type bristol > $LOG 2>&1" >> Makefile
             echo >> Makefile
             ALL+=" $OUT"
         done
