@@ -19,17 +19,17 @@ def get_boot_cost(row):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Append execution estimates to aggregated logs csv file")
-    parser.add_argument("-i", "--inp", required=True, help="input csv")
+    parser.add_argument("inp", nargs="+", help="input csv")
     parser.add_argument("--opt", default="./concrete/compilers/concrete-optimizer/optimizer",
                         help="path to patched concrete v0-optimizer")
-    parser.add_argument(
-        "-o", "--out", default="out_est.csv", help="output csv")
 
     args = parser.parse_args()
 
-    df = pd.read_csv(args.inp)
+    for name in args.inp:
+        df = pd.read_csv(name)
 
-    df.sort_values(["bench", "mapper", "fbs_size"], inplace=True)
-    df["boot_cost"] = df.apply(get_boot_cost, axis=1)
+        df.sort_values(["bench", "mapper", "fbs_size"], inplace=True)
+        df["boot_cost"] = df.apply(get_boot_cost, axis=1)
 
-    df.to_csv(args.out, index=False)
+        out_name = name.replace(".csv", "_est.csv")
+        df.to_csv(out_name, index=False)
