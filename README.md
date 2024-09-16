@@ -22,13 +22,13 @@ Install required python packages:
 pip3 install -r requirements.txt
 ```
 
-## Run benchmarks
+### Run benchmarks
 
 ```bash
 bash run_benchmarks.sh
 ```
 
-## Analyse results
+### Analyse results
 
 ```bash
 cd outputs
