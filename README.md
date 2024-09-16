@@ -2,7 +2,14 @@
 
 This repository contains the code used in paper *[A fast heuristic for mapping Boolean circuits to functional bootstrapping](https://eprint.iacr.org/2024/1204)*.
 
-## Preliminaries
+## How to run the experiments
+
+### Preliminaries
+
+Go to `experiments` directory:
+```bash
+cd experiments
+```
 
 Clone and patch concrete to support non power-of-two parameters:
 ```bash
