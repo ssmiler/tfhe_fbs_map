@@ -114,7 +114,8 @@ class MapToFBSHeur:
 
     def _get_fbs_test_vector(self, tt, mvt):
         tv = self._comp_boot_test_vector(tt, mvt, 0)
-        if self._is_test_vector_valid(tv): return tv
+        if self._is_test_vector_valid(tv):
+            return tv
         tv = self._comp_boot_test_vector(tt, mvt, 1)
         assert(self._is_test_vector_valid(tv))
         return tv
@@ -261,7 +262,8 @@ class MapToFBSHeur:
         return self.new_bootstrap(lut_env.cone).support[0]
 
     def new_bootstrap(self, lut_env, cone):
-        if len(cone.support) == 0 or len(cone.support) == 1:  # if cone is constant or has 1-input do nothing
+        # if cone is constant or has 1-input do nothing
+        if len(cone.support) == 0 or len(cone.support) == 1:
             return cone
 
         # shift mvt to start from 0
@@ -339,6 +341,25 @@ class MapToFBSHeur:
         else:
             return None, None
 
+    def _generate_coefs_grouped_by_fbs_size(self, cone1_size, cone2_size):
+        if cone1_size < cone2_size:
+            coefs_iter = it.product(
+                range(cone2_size + 1), range(-cone1_size, cone1_size + 1))
+        else:
+            coefs_iter = it.product(
+                range(-cone2_size, cone2_size + 1), range(cone1_size + 1))
+
+        coefs_list = np.array(list(coefs_iter))
+        out_fbs_size = np.abs(
+            coefs_list[:, 0]) * (cone1_size - 1) + np.abs(coefs_list[:, 1]) * (cone2_size - 1)
+
+        res = {}
+        for size in np.unique(out_fbs_size):
+            idx = out_fbs_size == size
+            res[size] = list(map(tuple, coefs_list[idx, :]))
+            res[size] = sorted(res[size], reverse=True)
+        return res
+
     def _find_lincomb_coefs_search(self, xy_mvt, r_tt):
         r_ab = None
         r_mvt = None
@@ -348,38 +369,24 @@ class MapToFBSHeur:
         cone1_mvt_max = self._mvt_size(xy_mvt[:, 0]) - 1
         cone2_mvt_max = self._mvt_size(xy_mvt[:, 1]) - 1
 
-        to_try = set([(cone2_mvt_max + 1, cone1_mvt_max + 1)])
-        tried = set()
-        while to_try:
-            a, b = to_try.pop()
-            tried.add((a, b))
+        coefs_by_fbs_size = self._generate_coefs_grouped_by_fbs_size(
+            self._mvt_size(xy_mvt[:, 0]), self._mvt_size(xy_mvt[:, 1]))
 
-            ab = None
-            if a > 1:
-                ab = (a-1, b)
-            elif a == 1:
-                ab = (-1, b)
-            elif a >= -cone2_mvt_max:
-                ab = (a-1, b)
-            if ab and ab not in tried:
-                to_try.add(ab)
+        for fbs_size_m1, coefs in coefs_by_fbs_size.items():
+            for (a, b) in coefs:
+                mvt_max = abs(a) * cone1_mvt_max + abs(b) * cone2_mvt_max
+                assert(mvt_max == fbs_size_m1)
 
-            ab = None
-            if b > 1:
-                ab = (a, b-1)
-            if ab and ab not in tried:
-                to_try.add(ab)
-
-            mvt_max = abs(a) * cone1_mvt_max + abs(b) * cone2_mvt_max
-
-            norm2 = a * a + b * b  # approximation of output cone lincomb norm2
-            if mvt_max < r_mvt_max or (mvt_max == r_mvt_max and norm2 < r_norm2):
-                mvt = a * xy_mvt[:, 0] + b * xy_mvt[:, 1]
-                if self._is_lut_valid(r_tt, mvt):
-                    r_ab = (a, b)
-                    r_mvt = mvt
-                    r_mvt_max = mvt_max
-                    r_norm2 = norm2
+                norm2 = a * a + b * b  # approximation of output cone lincomb norm2
+                if mvt_max < r_mvt_max or (mvt_max == r_mvt_max and norm2 < r_norm2):
+                    mvt = a * xy_mvt[:, 0] + b * xy_mvt[:, 1]
+                    if self._is_lut_valid(r_tt, mvt):
+                        r_ab = (a, b)
+                        r_mvt = mvt
+                        r_mvt_max = mvt_max
+                        r_norm2 = norm2
+            if r_ab is not None:
+                break
 
         return r_ab, r_mvt
 
