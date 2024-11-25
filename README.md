@@ -22,6 +22,9 @@ Install required python packages:
 pip3 install -r requirements.txt
 ```
 
+> [!NOTE]
+> Minimum Python version `3.10` required 
+
 ### Run benchmarks
 
 ```bash
