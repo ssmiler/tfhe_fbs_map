@@ -92,16 +92,17 @@ def parse_bristol(filename: str):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Map logic gates to Functional Boostrapping (FBS)")
-    parser.add_argument("filename", help="input blif filename")
+    parser.add_argument("filename", help="input circuit")
     parser.add_argument(
-        "--type", choices=["blif", "bristol"], default="blif", help="input file type")
+        "--type", choices=["blif", "bristol"], default="blif", help="format")
     parser.add_argument("--fbs_size", default=3,
-                        type=int, help="FBS size to use")
+                        type=int, help="FBS size")
     parser.add_argument(
-        "--mapper", choices=["basic", "naive", "search"], default="search", help="FBS mapper to use")
+        "--mapper", choices=["basic", "naive", "search"], default="search", help="mapping strategy")
     parser.add_argument("--strict_fbs_size", action="store_true",
-                        help="Do not use anti-cyclic ring property")
-    parser.add_argument("--output", help="file to output mapped circuit")
+                        help="do not use anti-cyclic ring property")
+    parser.add_argument("--output", help="output mapped circuit file")
+    parser.add_argument("--output_lbf", help="output mapped circuit file in LBS format")
     parser.add_argument("--max_tt_size", default=16, type=int,
                         help="maximal truth table size (log2) before bootstrapping")
     parser.add_argument("--verbose", "-v", action="count", default=0)
@@ -180,3 +181,6 @@ if __name__ == '__main__':
 
     if args.output is not None:
         lut_env.print(show_outputs=True, os=open(args.output, "w"))
+
+    if args.output_lbf is not None:
+        lut_env.write_lbf(os=open(args.output_lbf, "w"))

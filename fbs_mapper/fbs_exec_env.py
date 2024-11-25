@@ -167,6 +167,39 @@ class LutExecEnv:
             for name, val in self.outputs.items():
                 print(f"Output {name} = {val.name}", file=os)
 
+    def write_lbf(self, os=sys.stdout):
+        import textwrap
+
+        inputs = list()
+        for instr in self.instructions:
+            match instr:
+                case LutExecEnv.Input(name=name):
+                    inputs.append(name)
+
+        line = f".inputs {' '.join(inputs)}"
+        print(' \\\n '.join(textwrap.wrap(line)), file=os)
+
+        line = f".outputs {' '.join(self.outputs.keys())}"
+        print(' \\\n '.join(textwrap.wrap(line)), file=os)
+
+        for instr in self.instructions:
+            match instr:
+                case LutExecEnv.Input():
+                    continue
+                case LutExecEnv.LinearProd(name=name, coef_vals=coef_vals, const_coef=const_coef):
+                    coef_vals = list(sorted(coef_vals, key=lambda e: e[1].name))
+                    coefs = list(map(lambda e: str(e[0]), coef_vals))
+                    inputs = list(map(lambda e: e[1].name, coef_vals))
+                    const_coef_str = f"{const_coef}" if const_coef != 0 else ""
+
+                    print(f".lincomb {' '.join(inputs)} {name}", file=os)
+                    print(f"{' '.join(coefs)} {const_coef_str}", file=os)
+                case LutExecEnv.Bootstrap(name=name, val=val, table=table):
+                    print(f".bootstrap {val.name} {name}", file=os)
+                    print(f"{''.join(map(str, table))}", file=os)
+                case _:
+                    assert(False), "Unknown instruction"
+
     def eval(self, input_values):
         wire_values = {"0": 0, "1": 1}
 
