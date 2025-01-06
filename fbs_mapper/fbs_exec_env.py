@@ -201,6 +201,10 @@ class LutExecEnv:
                 case _:
                     assert(False), "Unknown instruction"
 
+        for out, val in self.outputs.items():
+            print(f".lincomb {val.name} {out}", file=os)
+            print(f"1", file=os)
+
     def eval(self, input_values):
         wire_values = {"0": 0, "1": 1}
 
