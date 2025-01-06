@@ -187,6 +187,7 @@ class LutExecEnv:
                 case LutExecEnv.Input():
                     continue
                 case LutExecEnv.LinearProd(name=name, coef_vals=coef_vals, const_coef=const_coef):
+                    # sort by input name
                     coef_vals = list(sorted(coef_vals, key=lambda e: e[1].name))
                     coefs = list(map(lambda e: str(e[0]), coef_vals))
                     inputs = list(map(lambda e: e[1].name, coef_vals))

@@ -335,54 +335,40 @@ for bench, cnt in zip(["trivium_iter", "kreyvium_iter"], [8, 10]):
 # aes sbox
 df1 = df
 df1 = df1[df1.mapper == "search"]
-df1 = df1[df1.fbs_size <= 14]
-df1 = df1[df1.fbs_size >= 4]
+# df1 = df1[df1.fbs_size <= 14]
+# df1 = df1[df1.fbs_size >= 4]
 d = df1[df1.bench == "aes_sbox"]
 
-fig = plt.figure()
-gs = fig.add_gridspec(2, hspace=0)
-axs = gs.subplots(sharex=True)
-ax1 = axs[0]
-ax1.set_ylabel('number of bootstraps')
-ax1.plot(d.fbs_size, d.nb_bootstrap, 'b.-')
-ax1.plot([11], [36], 'ro') # 36 is nb. FBS from Bon et al.
-ax1.tick_params(axis='y')
-ax1.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+# Bon et al. results
+bon_aes_nb_fbs = 36
+bon_aes_fbs_size = 11
+bon_aes_total_cost = bon_aes_nb_fbs * 69 # 69 is the FBS cost with precision 11 and sq-norm2 > 2
 
-ax2 = axs[1]
-ax2.set_xlabel('FBS size (p)')
-ax2.set_ylabel('evaluation cost')
-ax2.plot(d.fbs_size, d.total_cost, 'b.-')
-ax2.plot([11], [36 * 69], 'ro') # 69 is the FBS cost with precision 11 and sq-norm2 > 2
-ax2.tick_params(axis='y')
+bon_ascon_nb_fbs = 5
+bon_ascon_fbs_size = 17
+bon_ascon_total_cost = bon_ascon_nb_fbs * 75 # 75 is the FBS cost with precision 17 and sq-norm2 > 2
 
-fig.tight_layout()  # otherwise the right y-label is slightly clipped
-fig.legend(ncol = 2)
-plt.savefig(f"aes_sbox.pdf")
 
-# ascon lut
+
+best_aes_idx = d.total_cost.idxmin()
+our_aes_nb_fbs = d.loc[best_aes_idx].nb_bootstrap
+our_aes_fbs_size = d.loc[best_aes_idx].fbs_size
+our_aes_max_lut_size = d.loc[best_aes_idx].max_lut_size
+our_aes_total_cost = d.loc[best_aes_idx].total_cost
+
 df1 = df
 df1 = df1[df1.mapper == "search"]
-df1 = df1[df1.fbs_size >= 7]
+# df1 = df1[df1.fbs_size >= 7]
 d = df1[df1.bench == "ascon_lut"]
 
-fig = plt.figure()
-gs = fig.add_gridspec(2, hspace=0)
-axs = gs.subplots(sharex=True)
-ax1 = axs[0]
-ax1.set_ylabel('number of bootstraps')
-ax1.plot(d.fbs_size, d.nb_bootstrap, 'b.-')
-ax1.plot([17], [5], 'ro') # 5 is nb. FBS from Bon et al.
-ax1.tick_params(axis='y')
-ax1.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+best_ascon_idx = d.total_cost.idxmin()
+our_ascon_nb_fbs = d.loc[best_ascon_idx].nb_bootstrap
+our_ascon_fbs_size = d.loc[best_ascon_idx].fbs_size
+our_ascon_max_lut_size = d.loc[best_ascon_idx].max_lut_size
+our_ascon_total_cost = d.loc[best_ascon_idx].total_cost
 
-ax2 = axs[1]
-ax2.set_xlabel('FBS size (p)')
-ax2.set_ylabel('evaluation cost')
-ax2.plot(d.fbs_size, d.total_cost, 'b.-')
-ax2.plot([17], [5 * 75], 'ro') # 5 is the FBS cost with precision 11 and sq-norm2 > 2
-ax2.tick_params(axis='y')
 
-fig.tight_layout()  # otherwise the right y-label is slightly clipped
-fig.legend(ncol = 2)
-plt.savefig(f"ascon_lut.pdf")
+# print(f"SIMON & {} & {} & {} & {} & ${}\\times$ \\")
+print(f"ASCON & {bon_ascon_nb_fbs} & {bon_ascon_fbs_size} & {our_ascon_nb_fbs} & {our_ascon_fbs_size} ({our_ascon_max_lut_size}) & ${bon_ascon_total_cost/our_ascon_total_cost:.2f}\\times$ \\\\")
+print(f"AES s-box & {bon_aes_nb_fbs} & {bon_aes_fbs_size} & {our_aes_nb_fbs} & {our_aes_fbs_size} ({our_aes_max_lut_size}) & ${bon_aes_total_cost/our_aes_total_cost:.2f}\\times$ \\\\")
+

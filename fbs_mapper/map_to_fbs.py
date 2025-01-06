@@ -377,9 +377,10 @@ class MapToFBSHeur:
                 mvt_max = abs(a) * cone1_mvt_max + abs(b) * cone2_mvt_max
                 assert(mvt_max == fbs_size_m1)
 
-                norm2 = a * a + b * b  # approximation of output cone lincomb norm2
-                if mvt_max < r_mvt_max or (mvt_max == r_mvt_max and norm2 < r_norm2):
-                    mvt = a * xy_mvt[:, 0] + b * xy_mvt[:, 1]
+                mvt = a * xy_mvt[:, 0] + b * xy_mvt[:, 1]
+                norm2 = np.square(mvt).sum()
+
+                if mvt_max < r_mvt_max or (mvt_max == r_mvt_max and (norm2 < r_norm2)):
                     if self._is_lut_valid(r_tt, mvt):
                         r_ab = (a, b)
                         r_mvt = mvt
