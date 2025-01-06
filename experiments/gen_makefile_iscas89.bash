@@ -49,11 +49,9 @@ BENCHES+=" benchmarks/iscas89/s838.bench"
 BENCHES+=" benchmarks/iscas89/s9234.bench"
 BENCHES+=" benchmarks/iscas89/s953.bench"
 
-FBS_SIZES=$(seq 3 32)
+FBS_SIZES=$(seq 2 32)
 
 MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
-
-MAPPERS="naive search"
 
 BENCH_XAG_DIR=outputs/benchmarks_xag/iscas89
 OUTPUT_DIR=outputs/iscas89
@@ -119,15 +117,14 @@ for BLIF in $BLIFS
 do
     BENCH=$(basename -- "$BLIF" .blif)
 
-    FBS_SIZE=2
-    for MAPPER in "basic" "search"
+    for MAPPER in "basic"
     do
-        run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
+        run_bench $BLIF $BENCH 2 $MAPPER >> Makefile
     done
 
     for FBS_SIZE in $FBS_SIZES
     do
-        for MAPPER in $MAPPERS
+        for MAPPER in "search"
         do
             run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
         done

@@ -13,8 +13,6 @@ FBS_SIZES=$(seq 3 16)
 
 MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
 
-MAPPERS="naive search"
-
 OUTPUT_DIR=outputs/epfl
 
 rm -f Makefile
@@ -53,15 +51,14 @@ for BLIF in $BENCHES
 do
     BENCH=$(basename -- "$BLIF" .blif)
 
-    FBS_SIZE=2
     for MAPPER in "basic" "search"
     do
-        run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
+        run_bench $BLIF $BENCH 2 $MAPPER >> Makefile
     done
 
     for FBS_SIZE in $FBS_SIZES
     do
-        for MAPPER in $MAPPERS
+        for MAPPER in "naive" "search"
         do
             run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
         done

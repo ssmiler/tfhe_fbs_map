@@ -30,11 +30,9 @@ BENCHES+=" benchmarks/bristol/AES-non-expanded.txt"
 # BENCHES+=" benchmarks/bristol/sha256.txt"
 # BENCHES+=" benchmarks/bristol/sha512.txt"
 
-FBS_SIZES=$(seq 3 16)
+FBS_SIZES=$(seq 2 16)
 
 MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
-
-MAPPERS="naive search"
 
 OUTPUT_DIR=outputs/bristol
 
@@ -74,15 +72,14 @@ for BENCH in $BENCHES
 do
     BASE=$(basename -- "$BENCH" .txt)
 
-    FBS_SIZE=2
-    for MAPPER in "basic" "search"
+    for MAPPER in "basic"
     do
-        run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
+        run_bench $BLIF $BENCH 2 $MAPPER >> Makefile
     done
 
     for FBS_SIZE in $FBS_SIZES
     do
-        for MAPPER in $MAPPERS
+        for MAPPER in "search"
         do
             run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
         done
