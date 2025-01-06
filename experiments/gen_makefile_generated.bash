@@ -39,7 +39,7 @@ function run_bench() {
     MAPPER=$4
 
     OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
-    OUT_LBF="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.lbf"
+    OUT_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.lbf"
     LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
     ALL+=" ${OUT_LBF}"
 
