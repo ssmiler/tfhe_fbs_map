@@ -54,6 +54,22 @@ echo -e "\t@mkdir -p $OUTPUT_DIR" >> Makefile
 echo >> Makefile
 ALL+=" $OUTPUT_DIR"
 
+function run_bench() {
+    BLIF=$1
+    BENCH=$2
+    FBS_SIZE=$3
+    MAPPER=$4
+
+    OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
+    OUT_LBF="$OUTPUT_DIR/$BASE"_"$FBS_SIZE"_"$MAPPER.lbf"
+    LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
+    ALL+=" ${OUT_LBF}"
+
+    echo "$OUT $OUT_LBF $LOG: $BLIF | $OUTPUT_DIR"
+    echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --output_lbf ${OUT_LBF} > $LOG 2>&1"
+    echo ""
+}
+
 for BLIF in $BLIFS
 do
     BENCH=$(basename -- "$BLIF" .blif)
@@ -61,24 +77,14 @@ do
     FBS_SIZE=2
     for MAPPER in "basic" "search"
     do
-        OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
-        LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
-        echo "$OUT $LOG: $BLIF | $OUTPUT_DIR" >> Makefile
-        echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
-        echo >> Makefile
-        ALL+=" $OUT"
+        run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
     done
 
     for FBS_SIZE in $FBS_SIZES
     do
         for MAPPER in $MAPPERS
         do
-            OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
-            LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
-            echo "$OUT $LOG: $BLIF | $OUTPUT_DIR" >> Makefile
-            echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT > $LOG 2>&1" >> Makefile
-            echo >> Makefile
-            ALL+=" $OUT"
+            run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
         done
     done
 
