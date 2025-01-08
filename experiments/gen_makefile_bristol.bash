@@ -64,7 +64,7 @@ function run_bench() {
     ALL+=" ${OUT_LBF}"
 
     echo "$OUT $OUT_LBF $LOG: $BLIF | $OUTPUT_DIR"
-    echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --output_lbf ${OUT_LBF} > $LOG 2>&1"
+    echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --type bristol --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --output_lbf ${OUT_LBF} > $LOG 2>&1"
     echo ""
 }
 
@@ -74,7 +74,7 @@ do
 
     for MAPPER in "basic"
     do
-        run_bench $BLIF $BENCH 2 $MAPPER >> Makefile
+        run_bench $BENCH $BASE 2 $MAPPER >> Makefile
     done
 
     for FBS_SIZE in $FBS_SIZES
