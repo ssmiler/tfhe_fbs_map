@@ -179,7 +179,7 @@ class LutExecEnv:
         line = f".inputs {' '.join(inputs)}"
         print(' \\\n '.join(textwrap.wrap(line)), file=os)
 
-        line = f".outputs {' '.join(self.outputs.keys())}"
+        line = f".outputs {' '.join(map(str, self.outputs.keys()))}"
         print(' \\\n '.join(textwrap.wrap(line)), file=os)
 
         for instr in self.instructions:
