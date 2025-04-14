@@ -233,11 +233,11 @@ for i, us in enumerate(bootstrap_inps.values()):
             if b and len(inps_i) == len(inps_j):
                 tt_j = tv_j[mvt_j]
 
-                if v := is_lut_valid_new_mvt(tt_i, tt_j, mvt_j) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
+                if is_lut_valid_new_mvt(tt_i, tt_j, mvt_j) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
                     merger.merge(out_j, out_i)
                     merger.merge_lincomb(inp_i)
                     break
-                if v := is_lut_valid_new_mvt(tt_j, tt_i, mvt_i) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
+                if is_lut_valid_new_mvt(tt_j, tt_i, mvt_i) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
                     merger.merge(out_i, out_j)
                     merger.merge_lincomb(inp_j)
                 continue
@@ -246,7 +246,7 @@ for i, us in enumerate(bootstrap_inps.values()):
                 tt_j = tv_j[mvt_j]
 
                 tt_j_p = proj_tt(inps_i, inps_j, pos, tt_j)
-                if v := is_lut_valid_new_mvt(tt_j_p, tt_i, mvt_i) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
+                if is_lut_valid_new_mvt(tt_j_p, tt_i, mvt_i) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
                     merger.merge(out_i, out_j)
                     merger.merge_lincomb(inp_j)
 
@@ -255,15 +255,13 @@ for i, us in enumerate(bootstrap_inps.values()):
                 tt_j = tv_j[mvt_j]
 
                 tt_i_p = proj_tt(inps_j, inps_i, pos, tt_i)
-                if v := is_lut_valid_new_mvt(tt_i_p, tt_j, mvt_j) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
+                if is_lut_valid_new_mvt(tt_i_p, tt_j, mvt_j) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
                     merger.merge(out_j, out_i)
                     merger.merge_lincomb(inp_i)
                     break
 
 
 print(f"Merged nodes: {merger.nb_merges()}")
-
-# reductions.sort(key=lambda e: e[1])
 
 bootstraps_map = dict()
 for id_i, src_nodes in merger.nodes_merged.items():
@@ -325,7 +323,7 @@ for u in circuit.outputs.keys():
     remaining_pred_to_visit[u] = len(node_preds[u])
 
 new_circuit = LutExecEnv()
-node_val = dict()
+node_val = {LutExecEnv.Const(value=0).name: LutExecEnv.Const(value=0), LutExecEnv.Const(value=1).name: LutExecEnv.Const(value=1)}
 visited = set() # visited nodes
 while to_visit:
     u = to_visit.pop(0)
