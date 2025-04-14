@@ -3,7 +3,7 @@ NB_J=4
 OUT_DIR=outputs
 
 mkdir -p ${OUT_DIR}
-rm -f ${OUT_DIR}/*.log
+# rm -f ${OUT_DIR}/*.log
 
 bash gen_makefile_epfl.bash
 mv Makefile ${OUT_DIR}/makefile_epfl
@@ -29,6 +29,8 @@ bash gen_makefile_bristol.bash
 mv Makefile ${OUT_DIR}/makefile_bristol
 make -f ${OUT_DIR}/makefile_bristol -j $NB_J >> ${OUT_DIR}/bristol.log 2>&1
 python3 build_csv.py -o ${OUT_DIR}/bristol_agg.csv ${OUT_DIR}/bristol/
+
+exit
 
 # add execution estimates
 python3 add_exec_estimates.py ${OUT_DIR}/*_agg.csv

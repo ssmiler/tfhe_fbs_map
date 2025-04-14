@@ -53,8 +53,8 @@ function run_merge_nodes() {
     MAPPER=$3
 
     INP_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}.lbf"
-    OUT_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}_merged.lbf"
-    LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}_merged.log"
+    OUT_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}.lbf.merged"
+    LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}.log.merged"
     ALL+=" ${OUT_LBF}"
 
     echo "$OUT_LBF $LOG: $INP_LBF | $OUTPUT_DIR"

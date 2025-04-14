@@ -394,8 +394,6 @@ input_vals = dict(
 output_values1 = circuit.eval(input_vals)
 output_values2 = new_circuit.eval(input_vals)
 
-new_circuit.write_lbf(open(args.output, "w"))
-
 assert(output_values1.keys() == output_values2.keys())
 for k in output_values1.keys():
     equal = np.all(output_values1[k] == output_values2[k])
@@ -403,3 +401,4 @@ for k in output_values1.keys():
         print(f"output {k} do not match {output_values1[k]} {output_values2[k]}")
     assert(equal)
 
+new_circuit.write_lbf(open(args.output, "w"))
