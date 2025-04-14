@@ -242,7 +242,7 @@ class LutExecEnv:
                     print(f"1", file=os)
 
     def eval(self, input_values):
-        wire_values = {"0": 0, "1": 1}
+        wire_values = {LutExecEnv.Const(value=0).name: 0, LutExecEnv.Const(value=1).name: 1}
 
         for instr in self.instructions:
             match instr:
