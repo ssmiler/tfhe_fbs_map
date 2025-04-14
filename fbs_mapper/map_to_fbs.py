@@ -125,7 +125,7 @@ class MapToFBSHeur:
 
         lut_env = LutExecEnv()
 
-        wires = {"0": self.new_const(0), "1": self.new_const(1)}
+        wires = {BitExecEnv.CONST0.name: self.new_const(0), BitExecEnv.CONST1.name: self.new_const(1)}
         for instr in env.instructions:
             match instr:
                 case BitExecEnv.Const(name=name):

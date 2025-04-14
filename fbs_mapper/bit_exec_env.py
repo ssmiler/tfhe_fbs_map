@@ -9,7 +9,7 @@ class BitExecEnv:
 
     class Const(Node):
         def __init__(self, val):
-            super().__init__(str(val))
+            super().__init__(f"CONST{val}")
             self.val = val
 
         def __str__(self):
@@ -171,7 +171,7 @@ class BitExecEnv:
                 print(f"Output {name} = {out.name}", file=os)
 
     def eval(self, input_values):
-        wire_values = {"0": 0, "1": 1}
+        wire_values = {BitExecEnv.CONST0.name: 0, BitExecEnv.CONST1.name: 1}
 
         for instr in self.instructions:
             match instr:

@@ -21,7 +21,7 @@ class LutExecEnv:
 
     class Const(Node):
         def __init__(self, value):
-            super().__init__(f"{value}")
+            super().__init__(f"CONST{value}")
             self.value = value
 
         def __str__(self):
@@ -232,8 +232,14 @@ class LutExecEnv:
                     assert(False), "Unknown instruction"
 
         for out, val in self.outputs.items():
-            print(f".lincomb {val.name} {out}", file=os)
-            print(f"1", file=os)
+            match val:
+                case LutExecEnv.Const(value=value):
+                    print(f".lincomb {out}", file=os)
+                    print(f"{value}", file=os)
+                case _:
+                    pass
+                    print(f".lincomb {val.name} {out}", file=os)
+                    print(f"1", file=os)
 
     def eval(self, input_values):
         wire_values = {"0": 0, "1": 1}
