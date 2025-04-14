@@ -1,0 +1,16 @@
+.inputs a b c d
+.outputs e f g h CONST1
+.lincomb CONST1     # CONSTANT
+1
+.lincomb a b n1     # n1 = 2.a + b, n1 in {0, 1, 2, 3}, sq. norm2 = 2^2 + 1^2 = 5
+2 1
+.lincomb a b n2     # n2 = a - b + 1, n2 in {0, 1, 2}, sq. norm2 = 1^2 + 1^2 = 2
+1 -1 1
+.bootstrap n1 e          # AND(a, b)
+0001
+.bootstrap n2 f          # XOR(a, b)
+101
+.bootstrap n2 g h        # 2-output bootstraping
+001                 # AND(a, NOT(b))
+010                 # XNOR(a, b)
+.end

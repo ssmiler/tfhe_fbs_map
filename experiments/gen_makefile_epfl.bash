@@ -12,6 +12,7 @@ BENCHES+=" "$(ls benchmarks/epfl/random_control/*.blif)
 FBS_SIZES=$(seq 3 16)
 
 MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
+MERGE_CIRCUIT_PY="../fbs_mapper/merge_fbs_nodes.py"
 
 OUTPUT_DIR=outputs/epfl
 
@@ -47,6 +48,21 @@ function run_bench() {
     echo ""
 }
 
+function run_merge_nodes() {
+    BENCH=$1
+    FBS_SIZE=$2
+    MAPPER=$3
+
+    INP_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}.lbf"
+    OUT_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}_merged.lbf"
+    LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}_merged.log"
+    ALL+=" ${OUT_LBF}"
+
+    echo "$OUT_LBF $LOG: $INP_LBF | $OUTPUT_DIR"
+    echo -e "\tpython3 $MERGE_CIRCUIT_PY ${INP_LBF} ${OUT_LBF} > $LOG 2>&1"
+    echo ""
+}
+
 for BLIF in $BENCHES
 do
     BENCH=$(basename -- "$BLIF" .blif)
@@ -55,15 +71,24 @@ do
     do
         run_bench $BLIF $BENCH 2 $MAPPER >> Makefile
     done
+    run_merge_nodes $BENCH 2 "search" >> Makefile
 
     for FBS_SIZE in $FBS_SIZES
     do
         for MAPPER in "naive" "search"
         do
             run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
+
         done
     done
 
+    for FBS_SIZE in $FBS_SIZES
+    do
+        for MAPPER in "search"
+        do
+            run_merge_nodes $BENCH $FBS_SIZE $MAPPER >> Makefile
+        done
+    done
 done
 
 echo ".DEFAULT_GOAL := all" >> Makefile

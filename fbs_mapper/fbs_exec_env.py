@@ -49,16 +49,29 @@ class LutExecEnv:
             return f"{elems} {const_factor}"
 
     class Bootstrap(Node):
-        def __init__(self, name, val, table):
+        def __init__(self, name, val, table, is_multi=False):
             super().__init__(name)
             assert(isinstance(table, list)), "Expected list"
             assert(isinstance(val, LutExecEnv.Node)
                    ), "Expected LutExecEnv.Node"
             self.table = table
             self.val = val
+            self.is_multi = is_multi
 
         def __str__(self):
             return f"Bootstrap({self.val.name}, {self.table})"
+
+    class BootstrapMulti(Node):
+        def __init__(self, bootstraps):
+            for bootstrap in bootstraps:
+                assert(isinstance(bootstrap, LutExecEnv.Bootstrap))
+                assert(bootstrap.is_multi)
+            name = ",".join(map(lambda bootstrap: bootstrap.name, bootstraps))
+            super().__init__(name)
+            self.bootstraps = bootstraps
+
+        def __str__(self):
+            return f"BootstrapMulti({self.name})"
 
     def __init__(self, merge_linear_prods=True):
         self._unique_id = 0
@@ -77,18 +90,20 @@ class LutExecEnv:
         assert(instr.name not in self.max_val), "Error"
         match instr:
             case LutExecEnv.Input():
-                max_val = 1
+                mv = 1
             case LutExecEnv.LinearProd(coef_vals=coef_vals, const_coef=const_coef):
-                max_val = const_coef + \
+                mv = const_coef + \
                     sum(map(lambda cv: max(
                         0, cv[0] * self.max_val[cv[1].name]), coef_vals))
             case LutExecEnv.Bootstrap(table=table):
                 assert(min(table) == 0)
-                max_val = max(table)
+                mv = max(table)
+            case LutExecEnv.BootstrapMulti():
+                return
             case _:
                 assert(False), "Unknown instruction"
-        self.max_val[instr.name] = max_val
-        self.logger.getChild("_set_value_bounds").info(f"{instr.name} {max_val}")
+        self.max_val[instr.name] = mv
+        self.logger.getChild("_set_value_bounds").info(f"{instr.name} {mv}")
 
     def _add_instr(self, instr):
         self.logger.getChild("_add_instr").info(f"{instr.name} = {instr}")
@@ -151,6 +166,14 @@ class LutExecEnv:
         res = self._add_instr(LutExecEnv.Bootstrap(self._new_id(), val, table))
         return res
 
+    def bootstrap_multi(self, val, tables):
+        assert(isinstance(val, LutExecEnv.Node)), "Expected LutExecEnv.Node"
+        assert(isinstance(tables, list)), "Expected list"
+        bootstraps = list(map(lambda table: self._add_instr(
+            LutExecEnv.Bootstrap(self._new_id(), val, table, is_multi=True)), tables))
+        res = self._add_instr(LutExecEnv.BootstrapMulti(bootstraps))
+        return res, bootstraps
+
     def output(self, name, val):
         assert(isinstance(val, LutExecEnv.Node)), "Expected LutExecEnv.Node"
         self.outputs[name] = val
@@ -188,16 +211,23 @@ class LutExecEnv:
                     continue
                 case LutExecEnv.LinearProd(name=name, coef_vals=coef_vals, const_coef=const_coef):
                     # sort by input name
-                    coef_vals = list(sorted(coef_vals, key=lambda e: e[1].name))
+                    coef_vals = list(
+                        sorted(coef_vals, key=lambda e: e[1].name))
                     coefs = list(map(lambda e: str(e[0]), coef_vals))
                     inputs = list(map(lambda e: e[1].name, coef_vals))
                     const_coef_str = f"{const_coef}" if const_coef != 0 else ""
 
                     print(f".lincomb {' '.join(inputs)} {name}", file=os)
                     print(f"{' '.join(coefs)} {const_coef_str}", file=os)
-                case LutExecEnv.Bootstrap(name=name, val=val, table=table):
+                case LutExecEnv.BootstrapMulti(name=name, bootstraps=bootstraps):
+                    name = " ".join(map(lambda e: e.name, bootstraps))
                     print(f".bootstrap {val.name} {name}", file=os)
-                    print(f"{''.join(map(str, table))}", file=os)
+                    for bootstrap in bootstraps:
+                        print(f"{''.join(map(str, bootstrap.table))}", file=os)
+                case LutExecEnv.Bootstrap(name=name, val=val, table=table, is_multi=is_multi):
+                    if not is_multi:
+                        print(f".bootstrap {val.name} {name}", file=os)
+                        print(f"{''.join(map(str, table))}", file=os)
                 case _:
                     assert(False), "Unknown instruction"
 
@@ -212,15 +242,19 @@ class LutExecEnv:
             match instr:
                 case LutExecEnv.Input(name=name):
                     val = np.array(input_values[name]).reshape(-1)
-                case LutExecEnv.LinearProd(coef_vals=coef_vals, const_coef=const_coef):
+                case LutExecEnv.Const(name=name, value=value):
+                    val = value
+                case LutExecEnv.LinearProd(name=name, coef_vals=coef_vals, const_coef=const_coef):
                     val = np.sum(list(
                         map(lambda cn: cn[0] * wire_values[cn[1].name], coef_vals)), axis=0) + const_coef
-                case LutExecEnv.Bootstrap(val=val, table=table):
+                case LutExecEnv.BootstrapMulti():
+                    pass
+                case LutExecEnv.Bootstrap(name=name, val=val, table=table):
                     val = np.fromiter(
                         map(lambda v: table[v], wire_values[val.name]), dtype=int)
                 case _:
                     assert(False), "Unknown instruction"
-            wire_values[instr.name] = val
+            wire_values[name] = val
 
         output_values = dict()
         for name, out in self.outputs.items():
@@ -245,6 +279,7 @@ class LutExecEnv:
     def stats(self):
         nb_inp = 0
         nb_linprod = 0
+        nb_bootstrap_multi = 0
         nb_bootstrap = 0
         max_lut_size = 0
 
@@ -258,8 +293,11 @@ class LutExecEnv:
                     nb_linprod += 1
                     norm2_vals[name] = sum(
                         map(lambda e: e[0] * e[0] * norm2_vals[e[1].name], coef_vals))
-                case LutExecEnv.Bootstrap(name=name, table=table):
-                    nb_bootstrap += 1
+                case LutExecEnv.BootstrapMulti(name=name, bootstraps=bootstraps):
+                    nb_bootstrap_multi += 1
+                case LutExecEnv.Bootstrap(name=name, table=table, is_multi=is_multi):
+                    if not is_multi:
+                        nb_bootstrap += 1
                     max_lut_size = max(max_lut_size, len(table))
                     norm2_vals[name] = 1
                 case _:
@@ -268,7 +306,9 @@ class LutExecEnv:
         d = dict(
             nb_inp=nb_inp,
             nb_linprod=nb_linprod,
-            nb_bootstrap=nb_bootstrap,
+            nb_bootstrap=nb_bootstrap + nb_bootstrap_multi,
+            nb_bootstrap_single=nb_bootstrap,
+            nb_bootstrap_multi=nb_bootstrap_multi,
             max_lut_size=max_lut_size,
             norm2_linprod=max(norm2_vals.values()),
             nb_out=len(self.outputs),
