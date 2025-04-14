@@ -33,6 +33,7 @@ BENCHES+=" benchmarks/bristol/AES-non-expanded.txt"
 FBS_SIZES=$(seq 2 16)
 
 MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
+MERGE_CIRCUIT_PY="../fbs_mapper/merge_fbs_nodes.py"
 
 OUTPUT_DIR=outputs/bristol
 
