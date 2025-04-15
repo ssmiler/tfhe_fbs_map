@@ -112,6 +112,12 @@ class LutEnvParser:
         def lincomb_callback(out, inps, coefs, const_coef):
             if len(inps) == 1 and coefs[0] == 1 and const_coef == 0:
                 node_val[out] = node_val[inps[0]]
+            # temporary fix because lbf output bug
+            elif len(inps) == 1 and inps[0] == '0' and coefs[0] == 1 and const_coef == 0:
+                node_val[out] = env.const(0)
+            # temporary fix because lbf output bug
+            elif len(inps) == 1 and inps[0] == '1' and coefs[0] == 1 and const_coef == 0:
+                node_val[out] = env.const(1)
             else:
                 vals = list(map(lambda inp: node_val[inp], inps))
                 node_val[out] = env.linear(coefs, vals, const_coef)
