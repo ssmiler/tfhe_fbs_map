@@ -78,27 +78,15 @@ class NodeMerger:
     def __init__(self):
         self.nodes_merged = dict() # inp_nodes[v] = [...] the list of nodes to be merged into v
         self.merged_into = dict() # node v is merged into u if merge_into[v] = u
-        self.merged_lincomb = set()
 
     def merge(self, dst, src):
         assert(not self.is_merged(src))
-
-        while dst in self.merged_into:
-            dst = self.merged_into[dst]
-
         t = self.nodes_merged.setdefault(dst, [])
         t.append(src)
-        if src in self.nodes_merged:
-            t.extend(self.nodes_merged.pop(src))
-
-        for n in t:
-            self.merged_into[n] = dst
-
-    def merge_lincomb(self, src):
-        self.merged_lincomb.add(src)
+        self.merged_into[src] = dst
 
     def is_merged(self, src):
-        return src in self.merged_into or src in self.merged_lincomb
+        return src in self.merged_into
 
     def nb_merges(self):
         return sum(map(len, self.nodes_merged.values()))
@@ -132,6 +120,7 @@ print(f"Input circuit: {circuit.stats()}")
 node_succs = dict()
 node_preds = dict()
 out_ids = set(circuit.outputs.keys())
+node_pos = dict(map(lambda e: (e[1].name, e[0]), enumerate(circuit.instructions)))
 
 for node in circuit.instructions:
     node_succs[node.name] = list()
@@ -153,46 +142,21 @@ for out, val in circuit.outputs.items():
     node_preds[out].append(val.name)
 
 
-merger = NodeMerger()
+print("Find possible bootstrap merges...")
 bootstrap_inps = dict()
-lincombs = dict()
-
-print("Find nodes used in more than 1 bootstrappings...")
 for i, node in enumerate(circuit.instructions):
     if i % 1000 == 0:
         print(f"{i} / {len(circuit.instructions)}\r", end="")
 
     match node:
-        case LutExecEnv.LinearProd(name=name, coef_vals=coef_vals, const_coef=const_coef):
-            if name not in out_ids:
-                coefs = list(map(lambda e: e[0], coef_vals))
-                inps = list(map(lambda e: e[1].name, coef_vals))
-                assert(inps == sorted(inps))
-                assert(len(inps) == len(set(inps)))
-                lincombs[name] = (inps, comp_mvt(coefs, const_coef))
-
         case LutExecEnv.Bootstrap(name=out, val=val, table=table, is_multi=is_multi):
             assert(not is_multi)
-
-            tv, inp = np.array(table), val.name
-
-            if len(lincombs[inp]) > 2: # lincomb already seen (ie already used in an FBS)
-                merger.merge(lincombs[inp][2], out)
-                continue
-
+            inp = val.name
             for v in node_preds[inp]:
                 bootstrap_inps.setdefault(v, set()).add(out)
 
-            inps, mvt = lincombs[inp]
-            lincombs[inp] = (inps, mvt, out, tv)
-
-print(f"Merged nodes in the input circuit: {merger.nb_merges()}")
-
-print("Find possible bootstrap merges...")
-node_pos = dict(map(lambda e: (e[1].name, e[0]), enumerate(circuit.instructions)))
-
 # check that u is not an ancestors of v and vice-versa
-def check_not_ancestor(node_preds, node_pos, u, v):
+def check_not_siblings(node_preds, node_pos, u, v):
     if node_pos[u] < node_pos[v]:
         u, v = v, u
     to_visit = set([u])
@@ -203,104 +167,131 @@ def check_not_ancestor(node_preds, node_pos, u, v):
             to_visit.update(node_preds[w])
     return True
 
+get_merge_data_cache = dict()
+def get_merge_data(circuit, boot_u):
+    if boot_u.name not in get_merge_data_cache:
+        assert(isinstance(boot_u, LutExecEnv.Bootstrap))
+
+        lincomb_u, tv_u = boot_u.val, np.array(boot_u.table)
+        assert(isinstance(lincomb_u, LutExecEnv.LinearProd))
+        inps_u = list(map(lambda val: val.name, lincomb_u.get_vals_iter()))
+        mvt_u = comp_mvt(list(lincomb_u.get_coefs_iter()), lincomb_u.const_coef)
+        tt_u = tv_u[mvt_u]
+
+        get_merge_data_cache[(boot_u.name)] = (inps_u, mvt_u, tt_u)
+
+    return get_merge_data_cache[boot_u.name]
+
+# check whether fbs node v can be merger in u
+can_merge_cache = dict()
+def can_merge(circuit, node_preds, node_pos, u, v):
+    assert(u != v)
+    boot_u = circuit.instructions[node_pos[u]]
+    inps_u, mvt_u, tt_u = get_merge_data(circuit, boot_u)
+
+    boot_v = circuit.instructions[node_pos[v]]
+    inps_v, mvt_v, tt_v = get_merge_data(circuit, boot_v)
+
+    b, pos = is_superset_with_pos(inps_u, inps_v)
+
+    merges = list()
+    if b and len(inps_u) == len(inps_v):
+        if is_lut_valid_new_mvt(tt_u, tt_v, mvt_v): #and check_not_siblings(node_preds, node_pos, u, v):
+            # merger u in v
+            merges.append((v, u))
+        if is_lut_valid_new_mvt(tt_v, tt_u, mvt_u): #and check_not_siblings(node_preds, node_pos, u, v):
+            # merger v in u
+            merges.append((u, v))
+        return merges
+
+    if b:
+        tt_v_p = proj_tt(inps_u, inps_v, pos, tt_v)
+        if is_lut_valid_new_mvt(tt_v_p, tt_u, mvt_u): #and check_not_siblings(node_preds, node_pos, u, v):
+            # merger u in v
+            merges.append((u, v))
+
+    b, pos = is_superset_with_pos(inps_v, inps_u)
+    if b:
+        tt_u_p = proj_tt(inps_v, inps_u, pos, tt_u)
+        if is_lut_valid_new_mvt(tt_u_p, tt_v, mvt_v): #and check_not_siblings(node_preds, node_pos, u, v):
+            # merger v in u
+            merges.append((v, u))
+    return merges
 
 visited = set()
+inp_out_merges = dict()
 for i, us in enumerate(bootstrap_inps.values()):
     if i % 1000 == 0:
         print(f"{i} / {len(bootstrap_inps.values())}\r", end="")
 
     us = list(us)
-    for k, out_i in enumerate(us):
-        if merger.is_merged(out_i): continue
+    for k, u in enumerate(us):
+        for v in us[k+1:]:
+            if (u, v) in visited or (v, u) in visited: continue
+            visited.add((u, v))
+            visited.add((v, u))
 
-        assert(len(node_preds[out_i]) == 1)
-        inp_i = node_preds[out_i][0]
-        inps_i, mvt_i, _, tv_i = lincombs[inp_i]
-        tt_i = tv_i[mvt_i]
+            merges = can_merge(circuit, node_preds, node_pos, u, v)
+            if merges and check_not_siblings(node_preds, node_pos, u, v):
+                u,v = merges[0]
+                inp_out_merges.setdefault(u, [[], []])
+                inp_out_merges.setdefault(v, [[], []])
+                inp_out_merges[u][0].append(v)
+                inp_out_merges[v][1].append(u)
+                if len(merges) > 1:
+                    inp_out_merges[v][0].append(u)
+                    inp_out_merges[u][1].append(v)
 
-        for out_j in us[k+1:]:
-            if merger.is_merged(out_j): continue
-            if (out_i, out_j) in visited or (out_j, out_i) in visited: continue
-            visited.add((out_i, out_j))
-            visited.add((out_j, out_i))
+def inp_out_merges_del(inp_out_merges, u):
+    inps, outs = inp_out_merges.pop(u)
+    for v in outs:
+        if v in inp_out_merges:
+            inp_out_merges[v][0].remove(u)
+    for v in inps:
+        if v in inp_out_merges:
+            inp_out_merges[v][1].remove(u)
 
-            assert(len(node_preds[out_j]) == 1)
-            inp_j = node_preds[out_j][0]
-            inps_j, mvt_j, _, tv_j = lincombs[inp_j]
-
-            b, pos = is_superset_with_pos(inps_i, inps_j)
-
-            if b and len(inps_i) == len(inps_j):
-                tt_j = tv_j[mvt_j]
-
-                if is_lut_valid_new_mvt(tt_i, tt_j, mvt_j) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
-                    merger.merge(out_j, out_i)
-                    merger.merge_lincomb(inp_i)
-                    break
-                if is_lut_valid_new_mvt(tt_j, tt_i, mvt_i) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
-                    merger.merge(out_i, out_j)
-                    merger.merge_lincomb(inp_j)
-                continue
-
-            if b:
-                tt_j = tv_j[mvt_j]
-
-                tt_j_p = proj_tt(inps_i, inps_j, pos, tt_j)
-                if is_lut_valid_new_mvt(tt_j_p, tt_i, mvt_i) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
-                    merger.merge(out_i, out_j)
-                    merger.merge_lincomb(inp_j)
-
-            b, pos = is_superset_with_pos(inps_j, inps_i)
-            if b:
-                tt_j = tv_j[mvt_j]
-
-                tt_i_p = proj_tt(inps_j, inps_i, pos, tt_i)
-                if is_lut_valid_new_mvt(tt_i_p, tt_j, mvt_j) and check_not_ancestor(node_preds, node_pos, out_i, out_j):
-                    merger.merge(out_j, out_i)
-                    merger.merge_lincomb(inp_i)
-                    break
-
+merger = NodeMerger()
+while inp_out_merges:
+    inp_out_deg = list(map(lambda e: (e[0], (len(e[1][0]), -len(e[1][1]))), inp_out_merges.items()))
+    u, _ = max(inp_out_deg, key=lambda e: e[1])
+    inps = copy.copy(inp_out_merges[u][0])
+    for v in inps:
+        assert(not merger.is_merged(v))
+        merger.merge(u, v)
+        inp_out_merges_del(inp_out_merges, v)
+    inp_out_merges_del(inp_out_merges, u)
 
 print(f"Merged nodes: {merger.nb_merges()}")
+# print(merger)
 
 bootstraps_map = dict()
-for id_i, src_nodes in merger.nodes_merged.items():
-    boot_i = circuit.instructions[node_pos[id_i]]
-    outs = [boot_i.name]
-    tables = [boot_i.table]
+for u, vs in merger.nodes_merged.items():
 
-    lincomb_i = boot_i.val
-    coefs_i = list(map(lambda e: e[0], lincomb_i.coef_vals))
-    inps_i = list(map(lambda e: e[1].name, lincomb_i.coef_vals))
-    mvt_i = comp_mvt(coefs_i, lincomb_i.const_coef)
+    boot_u = circuit.instructions[node_pos[u]]
+    merged_outs = [boot_u.name]
+    merged_tables = [boot_u.table]
 
-    for id_j in src_nodes:
-        assert(id_j != id_i)
+    inps_u, mvt_u, tt_u = get_merge_data(circuit, boot_u)
 
-        boot_j = circuit.instructions[node_pos[id_j]]
+    for v in vs:
+        boot_v = circuit.instructions[node_pos[v]]
+        inps_v, mvt_v, tt_v = get_merge_data(circuit, boot_v)
 
-        lincomb_j = boot_j.val
-        coefs_j = list(map(lambda e: e[0], lincomb_j.coef_vals))
-        inps_j = list(map(lambda e: e[1].name, lincomb_j.coef_vals))
-        mvt_j = comp_mvt(coefs_j, lincomb_j.const_coef)
-
-        tv_j = boot_j.table
-        tt_j = np.array(tv_j)[mvt_j]
-
-        b, pos = is_superset_with_pos(inps_i, inps_j)
+        b, pos = is_superset_with_pos(inps_u, inps_v)
         assert(b)
-        tt_j_p = proj_tt(inps_i, inps_j, pos, tt_j)
+        tt_v_p = proj_tt(inps_u, inps_v, pos, tt_v)
 
-        #TODO: use same v for all merged nodes
-        v = is_lut_valid_new_mvt(tt_j_p, tt_i, mvt_i)
-        assert(len(v) > 0)
+        t = is_lut_valid_new_mvt(tt_v_p, tt_u, mvt_u)
+        assert(len(t) > 0)
 
-        tv_j_p = comp_fbs_test_vector(tt_j_p, mvt_i, v[0])
+        #TODO: use same t for all merged nodes
+        tv_v_p = comp_fbs_test_vector(tt_v_p, mvt_u, t[0])
 
-        outs.append(id_j)
-        tables.append(tv_j_p)
+        merged_outs.append(v)
+        merged_tables.append(tv_v_p)
 
-    bootstraps_map[id_i] = (outs, tables)
+    bootstraps_map[u] = (merged_outs, merged_tables)
 
 
 # find number of remaining predecessors to visit for each node in the new circuit
@@ -383,12 +374,12 @@ for out, val in circuit.outputs.items():
 
 print(f"Output circuit: {new_circuit.stats()}")
 
-
+# check circuit equivalence
 inp_ids = list(map(lambda inp: inp.name, filter(lambda node: isinstance(node, LutExecEnv.Input), circuit.instructions)))
 
 np.random.seed(42)
 input_vals = dict(
-    map(lambda inp: (inp, np.random.randint(0, 2, (4))), inp_ids))
+    map(lambda inp: (inp, np.random.randint(0, 2, (100))), inp_ids))
 output_values1 = circuit.eval(input_vals)
 output_values2 = new_circuit.eval(input_vals)
 
@@ -399,4 +390,5 @@ for k in output_values1.keys():
         print(f"output {k} do not match {output_values1[k]} {output_values2[k]}")
     assert(equal)
 
-new_circuit.write_lbf(open(args.output, "w"))
+if args.output:
+    new_circuit.write_lbf(open(args.output, "w"))

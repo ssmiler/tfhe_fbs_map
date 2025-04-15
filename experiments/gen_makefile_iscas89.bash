@@ -56,6 +56,7 @@ MERGE_CIRCUIT_PY="../fbs_mapper/merge_fbs_nodes.py"
 
 BENCH_XAG_DIR=outputs/benchmarks_xag/iscas89
 OUTPUT_DIR=outputs/iscas89
+OUTPUT_DIR_MERGED=$OUTPUT_DIR"_merged"
 
 rm -f Makefile
 ALL=""
@@ -95,8 +96,10 @@ ALL+=" $BLIFS"
 # targets for mapping bench circuits to FBSs
 echo "$OUTPUT_DIR:" >> Makefile
 echo -e "\t@mkdir -p $OUTPUT_DIR" >> Makefile
+echo "$OUTPUT_DIR_MERGED:" >> Makefile
+echo -e "\t@mkdir -p $OUTPUT_DIR_MERGED" >> Makefile
 echo >> Makefile
-ALL+=" $OUTPUT_DIR"
+ALL+=" $OUTPUT_DIR $OUTPUT_DIR_MERGED"
 
 function run_bench() {
     BLIF=$1
@@ -120,8 +123,8 @@ function run_merge_nodes() {
     MAPPER=$3
 
     INP_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}.lbf"
-    OUT_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}.lbf.merged"
-    LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"${MAPPER}.log.merged"
+    OUT_LBF="$OUTPUT_DIR_MERGED/$BENCH"_"$FBS_SIZE"_"${MAPPER}.lbf"
+    LOG="$OUTPUT_DIR_MERGED/$BENCH"_"$FBS_SIZE"_"${MAPPER}.log"
     ALL+=" ${OUT_LBF}"
 
     echo "$OUT_LBF $LOG: $INP_LBF | $OUTPUT_DIR"
@@ -136,6 +139,7 @@ do
     for MAPPER in "basic"
     do
         run_bench $BLIF $BENCH 2 $MAPPER >> Makefile
+        run_merge_nodes $BENCH 2 $MAPPER >> Makefile
     done
 
     for FBS_SIZE in $FBS_SIZES
@@ -143,14 +147,6 @@ do
         for MAPPER in "search"
         do
             run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
-
-        done
-    done
-
-    for FBS_SIZE in $FBS_SIZES
-    do
-        for MAPPER in "search"
-        do
             run_merge_nodes $BENCH $FBS_SIZE $MAPPER >> Makefile
         done
     done

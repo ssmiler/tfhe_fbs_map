@@ -48,6 +48,12 @@ class LutExecEnv:
             const_factor = f"+ {self.const_coef}" if self.const_coef != 0 else ""
             return f"{elems} {const_factor}"
 
+        def get_coefs_iter(self):
+            return map(lambda cv: cv[0], self.coef_vals)
+
+        def get_vals_iter(self):
+            return map(lambda cv: cv[1], self.coef_vals)
+
     class Bootstrap(Node):
         def __init__(self, name, val, table, is_multi=False):
             super().__init__(name)
