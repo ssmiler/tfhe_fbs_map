@@ -6,6 +6,14 @@ This repository contains the code used in paper *[A fast heuristic for mapping B
 
 ### Preliminaries
 
+Install required python packages:
+```bash
+pip3 install -r ../requirements.txt
+```
+
+> [!NOTE]
+> The experiments were executed using Python version `3.10`
+
 Go to `experiments` directory:
 ```bash
 cd experiments
@@ -17,23 +25,49 @@ git clone https://github.com/zama-ai/concrete.git -b nightly-2024.04.17
 (cd concrete; git apply ../concrete.patch)
 ```
 
-Install required python packages:
-```bash
-pip3 install -r requirements.txt
-```
-
 > [!NOTE]
-> Minimum Python version `3.10` required 
+> Rust is required to compile `concrete`
 
 ### Run benchmarks
+
+
+Install [abc](https://github.com/berkeley-abc/abc) and `libreadline` (required to compile `abc`) libraries.
+`abc` is used to transform benchmarks to XAG (Xor-And Graph) circuits.
+
+```bash
+apt install libreadline-dev
+bash install_abc.sh
+```
+
+Use the following script to execute all the benchmarks (it should take less than 24h :smile:):
 
 ```bash
 bash run_benchmarks.sh
 ```
 
+The script creates a `Makefile` for each benchmark suite (`epfl`, `iscas85`, etc.).
+The targets in the makefile are the calls of the mapping heuristic with specific parameters.
+
+
+As example, in the makefile `outputs/makefile_epfl` the target (`outputs/epfl/adder_15_search.fbs`) will execute the ``search'' flavor of the mapping heuristic (`../fbs_mapper/map_circuit.py --mapper search`) on circuit `benchmarks/epfl/arithmetic/adder.blif` with functional bootstrapping size `15`.
+The respective makefile lines:
+
+```
+...
+outputs/epfl/adder_15_search.fbs outputs/epfl/adder_15_search.lbf outputs/epfl/adder_15_search.log: benchmarks/epfl/arithmetic/adder.blif | outputs/epfl
+        python3 ../fbs_mapper/map_circuit.py benchmarks/epfl/arithmetic/adder.blif --fbs_size 15 --mapper search --output outputs/epfl/adder_15_search.fbs --output_lbf outputs/epfl/adder_15_search.lbf > outputs/epfl/adder_15_search.log 2>&1
+...
+```
+
+
 ### Analyse results
+
+The following script will interpret the mapping results obtained after the benchmarks execution and generate tables and figures used in the paper.
 
 ```bash
 cd outputs
-python3 analyse_results.py
+python3 ../analyse_results.py
 ```
+
+> [!NOTE]
+> The script `analyse_results.py` outputs raw results (eg only latex table content is generated, no `\begin{table}`)

@@ -1,7 +1,7 @@
 #! /bin/bash
 
 # clone and compile abc
-[ -f abc/abc ] || ( echo "Clone and compile abc" && git clone https://github.com/berkeley-abc/abc && cd abc && make -j4 abc ) || exit
+[ -f abc/abc ] || ( bash install_abc.sh  ) || exit
 
 # clone EPFL benchmarks
 [ -d benchmarks/epfl ] || ( echo "Clone EPFL circuit benchmark" && git clone https://github.com/lsils/benchmarks benchmarks/epfl ) || exit
