@@ -42,7 +42,7 @@ bash run_benchmarks.sh
 
 The script creates a `Makefile` for each benchmark suite (`epfl`, `iscas85`, etc.).
 The targets in the makefile are the calls of the mapping heuristic with specific parameters.
-The standard and error outputs of each makefile execution is streamed into a log file, `outputs/epfl.log` for EPFL benchmarks, etc.
+The output of each makefile execution is streamed to a log file (`outputs/epfl.log` for EPFL benchmarks, etc.).
 Use `tail -f outputs/epfl.log` to follow benchmark executions.
 
 
