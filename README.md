@@ -8,7 +8,7 @@ This repository contains the code used in paper *[A fast heuristic for mapping B
 
 Install the required python packages and go to the `experiments` directory:
 ```bash
-pip3 install -r ../requirements.txt
+pip3 install -r requirements.txt
 cd experiments
 ```
 
@@ -67,4 +67,4 @@ python3 ../analyse_results.py
 ```
 
 > [!NOTE]
-> The script `analyse_results.py` only outputs raw latex code (e.g. only latex table content is generated without table headers)
+> The script `analyse_results.py` only outputs raw latex code (e.g. only latex table content is generated without table floats instructions)

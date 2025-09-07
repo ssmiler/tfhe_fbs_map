@@ -3,8 +3,10 @@ blifparser==2.0.1
 circuit==1.1.0
 cycler==0.12.1
 fonttools==4.59.2
+Jinja2==3.1.6
 kiwisolver==1.4.9
 logical==1.0.0
+MarkupSafe==3.0.2
 matplotlib==3.5.3
 networkx==2.6.3
 numpy==1.26.4
