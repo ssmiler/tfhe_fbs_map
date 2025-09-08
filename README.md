@@ -19,8 +19,6 @@ git clone https://github.com/zama-ai/concrete.git -b nightly-2024.04.17
 ```
 
 > [!NOTE]
-> The experiments were executed using Python version `3.10`.
->
 > A working Rust installation is required to compile `concrete`
 
 
