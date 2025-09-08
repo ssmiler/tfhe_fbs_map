@@ -63,7 +63,7 @@ def f2b(df):
         t["ratio_boots"] = (t["nb_bootstrap"] / t_ref["nb_bootstrap"] - 1) * 100
         t["FBS size"] = t.apply(lambda e: f"{int(e.fbs_size)} ({int(e.max_lut_size)})", axis = 1)
         t.drop(["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"], inplace=True, axis=1)
-        t.columns = ["cost", "\#boots.", "FBS size"]
+        t.columns = ["cost", "\\#boots.", "FBS size"]
         return t
 
     df1 = df
@@ -124,7 +124,7 @@ df = pd.concat((df, e))
 
 df1 = f2b(df)
 df1 = df1.loc[bench_arith + bench_ctrl]
-df1.index = df1.index.str.replace("_", "\_")
+df1.index = df1.index.str.replace("_", "\\_")
 df1.index = "\\textsf{" + df1.index + "}"
 df1.loc["avg."] = df1.mean(numeric_only = True)
 
@@ -132,11 +132,11 @@ df2 = df1.astype(str)
 df2.iloc[:, [0,1,3,4]] = ""
 
 idx = df1.iloc[:, 0] > -0.5
-df2.iloc[:, [0, 1]] = df1.iloc[:, [0, 1]].map(lambda e: f"${e:2.0f}\%$")
+df2.iloc[:, [0, 1]] = df1.iloc[:, [0, 1]].map(lambda e: f"${e:2.0f}\\%$")
 df2.iloc[idx, [0, 1, 2]] = ""
 
 idx = df1.iloc[:, 3] > -0.5
-df2.iloc[:, [3, 4]] = df1.iloc[:, [3, 4]].map(lambda e: f"${e:2.0f}\%$")
+df2.iloc[:, [3, 4]] = df1.iloc[:, [3, 4]].map(lambda e: f"${e:2.0f}\\%$")
 df2.iloc[idx, [3, 4, 5]] = ""
 
 df2.iloc[-1, [2,5]] = ""

@@ -180,7 +180,9 @@ if __name__ == '__main__':
         assert(equal)
 
     if args.output is not None:
-        lut_env.print(show_outputs=True, os=open(args.output, "w"))
+        with open(args.output, "w") as file:
+            lut_env.print(show_outputs=True, os=file)
 
     if args.output_lbf is not None:
-        lut_env.write_lbf(os=open(args.output_lbf, "w"))
+        with open(args.output_lbf, "w") as file:
+            lut_env.write_lbf(os=file)
