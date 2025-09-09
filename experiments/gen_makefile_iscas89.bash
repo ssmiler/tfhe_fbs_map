@@ -1,7 +1,7 @@
 #! /bin/bash
 
 # clone and compile abc
-[ -f abc/abc ] || ( echo "Clone and compile abc" && git clone https://github.com/berkeley-abc/abc && cd abc && make -j4 abc ) || exit
+[ -f abc/abc ] || ( bash install_abc.sh  ) || exit
 
 # wget benchmarks
 [ -d benchmarks/iscas89/ ] || ( echo "Wget benchmarks" && wget -nd -r -l1 -A "*.bench" https://pld.ttu.ee/~maksim/benchmarks/iscas89/bench -P benchmarks/iscas89/ ) || exit

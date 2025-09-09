@@ -63,7 +63,7 @@ def f2b(df):
         t["ratio_boots"] = (t["nb_bootstrap"] / t_ref["nb_bootstrap"] - 1) * 100
         t["FBS size"] = t.apply(lambda e: f"{int(e.fbs_size)} ({int(e.max_lut_size)})", axis = 1)
         t.drop(["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"], inplace=True, axis=1)
-        t.columns = ["cost", "\#boots.", "FBS size"]
+        t.columns = ["cost", "\\#boots.", "FBS size"]
         return t
 
     df1 = df
@@ -124,7 +124,7 @@ df = pd.concat((df, e))
 
 df1 = f2b(df)
 df1 = df1.loc[bench_arith + bench_ctrl]
-df1.index = df1.index.str.replace("_", "\_")
+df1.index = df1.index.str.replace("_", "\\_")
 df1.index = "\\textsf{" + df1.index + "}"
 df1.loc["avg."] = df1.mean(numeric_only = True)
 
@@ -132,11 +132,11 @@ df2 = df1.astype(str)
 df2.iloc[:, [0,1,3,4]] = ""
 
 idx = df1.iloc[:, 0] > -0.5
-df2.iloc[:, [0, 1]] = df1.iloc[:, [0, 1]].map(lambda e: f"${e:2.0f}\%$")
+df2.iloc[:, [0, 1]] = df1.iloc[:, [0, 1]].map(lambda e: f"${e:2.0f}\\%$")
 df2.iloc[idx, [0, 1, 2]] = ""
 
 idx = df1.iloc[:, 3] > -0.5
-df2.iloc[:, [3, 4]] = df1.iloc[:, [3, 4]].map(lambda e: f"${e:2.0f}\%$")
+df2.iloc[:, [3, 4]] = df1.iloc[:, [3, 4]].map(lambda e: f"${e:2.0f}\\%$")
 df2.iloc[idx, [3, 4, 5]] = ""
 
 df2.iloc[-1, [2,5]] = ""
@@ -348,7 +348,9 @@ bon_ascon_nb_fbs = 5
 bon_ascon_fbs_size = 17
 bon_ascon_total_cost = bon_ascon_nb_fbs * 75 # 75 is the FBS cost with precision 17 and sq-norm2 > 2
 
-
+bon_simon_nb_fbs = 1
+bon_simon_fbs_size = 9
+bon_simon_total_cost = bon_simon_nb_fbs * 47 # 47 is the FBS cost with precision 9 and sq-norm2 > 2
 
 best_aes_idx = d.total_cost.idxmin()
 our_aes_nb_fbs = d.loc[best_aes_idx].nb_bootstrap
@@ -368,7 +370,20 @@ our_ascon_max_lut_size = d.loc[best_ascon_idx].max_lut_size
 our_ascon_total_cost = d.loc[best_ascon_idx].total_cost
 
 
-# print(f"SIMON & {} & {} & {} & {} & ${}\\times$ \\")
+df1 = df
+df1 = df1[df1.mapper == "search"]
+# df1 = df1[df1.fbs_size >= 7]
+d = df1[df1.bench == "simon_iter"]
+
+
+best_simon_idx = d.total_cost.idxmin()
+our_simon_nb_fbs = d.loc[best_simon_idx].nb_bootstrap
+our_simon_fbs_size = d.loc[best_simon_idx].fbs_size
+our_simon_max_lut_size = d.loc[best_simon_idx].max_lut_size
+our_simon_total_cost = d.loc[best_simon_idx].total_cost
+
+
+print(f"SIMON & {bon_simon_nb_fbs} & {bon_simon_fbs_size} & {our_simon_nb_fbs} & {our_simon_fbs_size} ({our_simon_max_lut_size}) & ${bon_simon_total_cost/our_simon_total_cost:.2f}\\times$ \\\\")
 print(f"ASCON & {bon_ascon_nb_fbs} & {bon_ascon_fbs_size} & {our_ascon_nb_fbs} & {our_ascon_fbs_size} ({our_ascon_max_lut_size}) & ${bon_ascon_total_cost/our_ascon_total_cost:.2f}\\times$ \\\\")
 print(f"AES s-box & {bon_aes_nb_fbs} & {bon_aes_fbs_size} & {our_aes_nb_fbs} & {our_aes_fbs_size} ({our_aes_max_lut_size}) & ${bon_aes_total_cost/our_aes_total_cost:.2f}\\times$ \\\\")
 
