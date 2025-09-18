@@ -139,13 +139,13 @@ class MapToFBSHeur:
                         map(lambda inp: wires[inp.name], inputs))
 
                     if len(input_wires) == 1:
-                        logger.info(f"Gate: {name} <- {inputs[0].name} ({input_wires[0].name()})")
+                        logger.info(f"Map gate: {name} <- {inputs[0].name} ({input_wires[0].name()})")
                     else:
-                        logger.info(f"Gate: {name} <- {inputs[0].name} {inputs[1].name} ({input_wires[0].name()} {input_wires[1].name()})")
+                        logger.info(f"Map gate: {name} <- {inputs[0].name} {inputs[1].name} ({input_wires[0].name()} {input_wires[1].name()})")
 
                     wire, bw = self.treat_bit_exec_lut_gate(
                         lut_env, input_wires, truth_table)
-                    logger.info(f"\t{wire.name()} {wire.tt} {wire.mvt}")
+                    logger.info(f"Mapped gate {name}: {wire.name()}")
 
                     for inp_idx, inp_new_wire in bw.items():
                         be_name = inputs[inp_idx].name
@@ -176,7 +176,7 @@ class MapToFBSHeur:
 
     def new_cone(self, *args, **kwargs):
         class Cone:
-            def __init__(self, parent, support, coefs, tt, mvt):
+            def __init__(self, parent, support, coefs, tt, mvt, support_names = None):
                 """
                 Circuit cone object.
 
@@ -197,8 +197,11 @@ class MapToFBSHeur:
                 self.tt = np.array(tt)
                 self.mvt = np.array(mvt)
                 assert(self.parent._is_lut_valid(self.tt, self.mvt)), f"{self.tt} {self.mvt}"
-                self._support_names = np.array(
-                    list(map(lambda e: e.name, self.support)))
+                if support_names:
+                    self._support_names = support_names
+                else:
+                    self._support_names = np.array(
+                        list(map(lambda e: e.name, self.support)))
                 if self.size() != len(np.unique(self.mvt)):
                     logging.critical(f"Cone with sparse mvt: {self.size()} {len(np.unique(self.mvt))}\t{self}")
 
@@ -230,6 +233,15 @@ class MapToFBSHeur:
         cone = Cone(self, *args, **kwargs)
         # print(f"{wire.name()} {wire.norm2}")
         return cone
+
+    def new_dummy_cone(self, name):
+        return self.new_cone(
+            support=["dummy"],
+            coefs=[1],
+            tt=[0, 1],
+            mvt=[0, 1],
+            support_names=["dummy"])
+
 
     def new_const(self, cst):
         return self.new_cone(
@@ -500,50 +512,78 @@ class MapToFBSHeur:
         xy_mvt, r_tt = self._get_cone_xy_mvt_and_tt(cone1, cone2, truth_table)
         if len(np.unique(r_tt)) == 1:
             return self.new_const(r_tt[0]), bootstrapped_wires
-
         ab, r_mvt = self._find_lincomb_coefs_cached(xy_mvt, r_tt)
-
-        logger.info(f"optimal lincomb 1st:")
-        logger.info(f"\t{ab}")
-        logger.info(f"\t{r_tt}")
-        logger.info(f"\t{r_mvt}")
 
         if ab == None:
-            logger.info(f"bootstrap {cone1.name()} ({idx1})")
-            bootstrapped_wires[idx1] = cone1 = self.new_bootstrap(
-                lut_env, cone1)
-        else:
-            return self._merge_cones(cone1, cone2, ab, r_tt, r_mvt), bootstrapped_wires
+            logger.info(f"No lincomb found for the composed gate")
 
-        xy_mvt, r_tt = self._get_cone_xy_mvt_and_tt(cone1, cone2, truth_table)
-        if len(np.unique(r_tt)) == 1:
-            return self.new_const(r_tt[0]), bootstrapped_wires
-        ab, r_mvt = self._find_lincomb_coefs_cached(xy_mvt, r_tt)
+            # compute first input bootstrapping result
+            cone1new = self.new_dummy_cone("try_bootstrap_input1")
+            xy_mvt_1, r_tt_1 = self._get_cone_xy_mvt_and_tt(cone1new, cone2, truth_table)
+            ab_1, r_mvt_1 = self._find_lincomb_coefs_cached(xy_mvt_1, r_tt_1)
 
-        logger.info(f"optimal lincomb 2nd:")
-        logger.info(f"\t{ab}")
-        logger.info(f"\t{r_tt}")
-        logger.info(f"\t{r_mvt}")
+            logger.info(f"Lincomb with bootstrapped {cone1.name()} ({idx1}):")
+            logger.info(f"\t{ab_1}")
+            logger.info(f"\t{r_tt_1}")
+            logger.info(f"\t{r_mvt_1}")
 
-        if ab == None:
-            logger.info(f"bootstrap {cone2.name()} ({idx2})")
-            bootstrapped_wires[idx2] = cone2 = self.new_bootstrap(
-                lut_env, cone2)
-        else:
-            return self._merge_cones(cone1, cone2, ab, r_tt, r_mvt), bootstrapped_wires
+            # compute second input bootstrapping result
+            cone2new = self.new_dummy_cone("try_bootstrap_input2")
+            xy_mvt_2, r_tt_2 = self._get_cone_xy_mvt_and_tt(cone1, cone2new, truth_table)
+            ab_2, r_mvt_2 = self._find_lincomb_coefs_cached(xy_mvt_2, r_tt_2)
 
-        xy_mvt, r_tt = self._get_cone_xy_mvt_and_tt(cone1, cone2, truth_table)
-        if len(np.unique(r_tt)) == 1:
-            return self.new_const(r_tt[0]), bootstrapped_wires
-        ab, r_mvt = self._find_lincomb_coefs_cached(xy_mvt, r_tt)
+            logger.info(f"Lincomb with bootstrapped {cone2.name()} ({idx2}):")
+            logger.info(f"\t{ab_2}")
+            logger.info(f"\t{r_tt_2}")
+            logger.info(f"\t{r_mvt_2}")
 
-        logger.info(f"optimal lincomb 3rd:")
+            # if bootstrapping either input leads to constant truth-table then early return
+            if len(np.unique(r_tt_1)) == 1:
+                bootstrapped_wires[idx1] = cone1 = self.new_bootstrap(lut_env, cone1)
+                return self.new_const(r_tt_1[0]), bootstrapped_wires
+
+            if len(np.unique(r_tt_2)) == 1:
+                bootstrapped_wires[idx2] = cone2 = self.new_bootstrap(lut_env, cone2)
+                return self.new_const(r_tt_2[0]), bootstrapped_wires
+
+            bootstrap_input1 = False
+            bootstrap_input2 = False
+            if ab_1 and ab_2:
+                # bootstrapping any input leads to valid combinations, keep the one producing minimal size mvt
+                if self._mvt_size(r_mvt_1) <= self._mvt_size(r_mvt_2):
+                    bootstrap_input1 = True
+                else:
+                    bootstrap_input2 = True
+            elif ab_1:
+                # bootstrapping first input leads to valid output
+                bootstrap_input1 = True
+            elif ab_2:
+                # bootstrapping second input leads to valid output
+                bootstrap_input2 = True
+            else: 
+                # bootstrapping either input does not lead to valid combination => bootstrap both inputs
+                bootstrap_input1 = True
+                bootstrap_input2 = True
+
+            if bootstrap_input1:
+                logger.info(f"Bootstrap {cone1.name()} ({idx1}):")
+                ab, r_tt, r_mvt = ab_1, r_tt_1, r_mvt_1
+                bootstrapped_wires[idx1] = cone1 = self.new_bootstrap(lut_env, cone1)
+
+            if bootstrap_input2:
+                logger.info(f"Bootstrap {cone2.name()} ({idx2}):")
+                ab, r_tt, r_mvt = ab_2, r_tt_2, r_mvt_2
+                bootstrapped_wires[idx2] = cone2 = self.new_bootstrap(lut_env, cone2)
+
+            xy_mvt, r_tt = self._get_cone_xy_mvt_and_tt(cone1, cone2, truth_table)
+            ab, r_mvt = self._find_lincomb_coefs_cached(xy_mvt, r_tt)
+
+        logger.info(f"Obtained lincomb")
         logger.info(f"\t{ab}")
         logger.info(f"\t{r_tt}")
         logger.info(f"\t{r_mvt}")
 
         assert(ab)
-
         return self._merge_cones(cone1, cone2, ab, r_tt, r_mvt), bootstrapped_wires
 
 
