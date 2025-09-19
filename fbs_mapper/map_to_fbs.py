@@ -123,6 +123,17 @@ class MapToFBSHeur:
     def map_internal(self, env: BitExecEnv, nodes_to_bootstrap):
         logger = self.logger.getChild("map_internal")
 
+        # find nodes output degree
+        out_degree = dict()
+        for instr in env.instructions:
+            out_degree[instr.name] = 0
+            match instr:
+                case BitExecEnv.LUT(name=name, inputs=inputs, truth_table=truth_table):
+                    for input in inputs:
+                        out_degree[input.name] += 1
+                case _:
+                    pass
+
         lut_env = LutExecEnv()
 
         wires = {"0": self.new_const(0), "1": self.new_const(1)}
@@ -145,6 +156,11 @@ class MapToFBSHeur:
 
                     wire, bw = self.treat_bit_exec_lut_gate(
                         lut_env, input_wires, truth_table)
+
+                    if wire.size() > 0.5 * self.fbs_size and out_degree[name] > 1:
+                        logger.info(f"Bootstrap gate {name} multi-output gate")
+                        nodes_to_bootstrap.add(name)
+
                     logger.info(f"Mapped gate {name}: {wire.name()}")
 
                     for inp_idx, inp_new_wire in bw.items():
