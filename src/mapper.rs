@@ -299,8 +299,18 @@ impl Mapper {
                                     truth_table: table.clone(),
                                     multivalue_table: vec![0, 1, 2, 3],
                                 };
-                                let bootstrapped = self.bootstrap_cone(&mut environment, cone)?;
-                                LutSignal::Node(bootstrapped.support[0])
+                                if self.is_lut_valid(&cone.truth_table, &cone.multivalue_table)
+                                    || self
+                                        .reusable_cone_coefficients(&environment, &cone)
+                                        .is_some()
+                                {
+                                    let bootstrapped =
+                                        self.bootstrap_cone(&mut environment, cone)?;
+                                    LutSignal::Node(bootstrapped.support[0])
+                                } else {
+                                    // Preserve basic's fixed encoding when no valid reuse is available.
+                                    environment.bootstrap(linear, table.clone())?
+                                }
                             } else {
                                 let minimum = usize::try_from(minimum).map_err(|_| {
                                     "binary Boolean encoding has a negative minimum".to_owned()
@@ -1469,6 +1479,44 @@ mod tests {
         assert_equivalent(&circuit, &mapped);
         assert_eq!(mapped.stats().bootstrap_count, 1);
         assert_eq!(mapped.to_lbf().matches(".bootstrap ").count(), 1);
+    }
+
+    #[test]
+    fn basic_multioutput_mode_supports_all_binary_truth_tables_at_size_two() {
+        let mut circuit = BitCircuit::default();
+        for name in ["a", "b"] {
+            circuit.inputs.push(circuit.nodes.len());
+            circuit.nodes.push(BitNode::Input { name: name.into() });
+        }
+        for truth in 0..16 {
+            let id = circuit.nodes.len();
+            let name = format!("y{truth}");
+            circuit.nodes.push(BitNode::Lut {
+                name: name.clone(),
+                inputs: vec![Signal::Node(0), Signal::Node(1)],
+                table: (0..4).map(|index| ((truth >> index) & 1) as u8).collect(),
+            });
+            circuit.outputs.push((name, Signal::Node(id)));
+        }
+        for multioutput_fbs in [false, true] {
+            let mapped = Mapper::new(MapConfig {
+                fbs_size: 2,
+                max_fbs_size: 4,
+                coefficient_policy: CoefficientPolicy::Basic,
+                multioutput_fbs,
+                ..MapConfig::default()
+            })
+            .unwrap()
+            .map(&circuit)
+            .unwrap();
+            assert_equivalent(&circuit, &mapped);
+            assert_eq!(
+                mapped.stats().bootstrap_count,
+                if multioutput_fbs { 1 } else { 16 }
+            );
+            assert_eq!(mapped.stats().max_lut_size, 4);
+            assert_eq!(mapped.stats().max_norm2, 5);
+        }
     }
 
     #[test]
