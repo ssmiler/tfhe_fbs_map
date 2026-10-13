@@ -86,6 +86,74 @@ type CandidateScore = (u8, u128, u128, u128, i64, i64);
 type CompositionTables = (Vec<(i64, i64)>, Vec<u8>);
 type ConeUpdates = [Option<Cone>; 2];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CandidateRow {
+    x: i64,
+    y: i64,
+    truth: u8,
+    count: usize,
+}
+
+fn candidate_rows<'a>(
+    xy: &'a [(i64, i64)],
+    truth_table: &'a [u8],
+) -> impl Iterator<Item = CandidateRow> + 'a {
+    xy.iter()
+        .zip(truth_table)
+        .map(|(&(x, y), &truth)| CandidateRow {
+            x,
+            y,
+            truth,
+            count: 1,
+        })
+}
+
+fn compact_candidate_rows(
+    xy: &[(i64, i64)],
+    truth_table: &[u8],
+    ranges: [(i64, usize); 2],
+) -> Option<Vec<CandidateRow>> {
+    if xy.len() != truth_table.len() || xy.is_empty() {
+        return None;
+    }
+    let dense_size = ranges[0]
+        .1
+        .checked_mul(ranges[1].1)
+        .and_then(|size| size.checked_mul(2))
+        .filter(|size| *size <= xy.len().saturating_mul(2));
+    // Use direct indexing for compact encoding ranges; avoid huge sparse grids.
+    let mut positions = vec![usize::MAX; dense_size.unwrap_or(0)];
+    let mut sparse_positions = HashMap::new();
+    let mut rows: Vec<CandidateRow> = Vec::new();
+    for row in candidate_rows(xy, truth_table) {
+        if row.truth > 1 {
+            return None;
+        }
+        let position = if positions.is_empty() {
+            *sparse_positions
+                .entry((row.x, row.y, row.truth))
+                .or_insert(rows.len())
+        } else {
+            let x = usize::try_from(row.x.checked_sub(ranges[0].0)?).ok()?;
+            let y = usize::try_from(row.y.checked_sub(ranges[1].0)?).ok()?;
+            if x >= ranges[0].1 || y >= ranges[1].1 {
+                return None;
+            }
+            let position = &mut positions[2 * (x * ranges[1].1 + y) + row.truth as usize];
+            if *position == usize::MAX {
+                *position = rows.len();
+            }
+            *position
+        };
+        if position == rows.len() {
+            rows.push(row);
+        } else {
+            rows[position].count += 1;
+        }
+    }
+    Some(rows)
+}
+
 struct CandidateWorkspace {
     coefficient_basis: Vec<(i64, i64)>,
     multivalue_table: Vec<i64>,
@@ -108,29 +176,53 @@ impl CandidateWorkspace {
     fn evaluate(
         &mut self,
         mapper: &Mapper,
-        xy: &[(i64, i64)],
-        truth_table: &[u8],
+        rows: impl IntoIterator<Item = CandidateRow>,
         scales: (i64, i64),
-    ) -> Option<u128> {
+    ) -> Option<(u128, u128)> {
         self.multivalue_table.clear();
-        self.multivalue_table
-            .extend(xy.iter().map(|(x, y)| scales.0 * x + scales.1 * y));
-        if !mapper.is_lut_valid_with_scratch(truth_table, &self.multivalue_table, &mut self.known) {
+
+        // The table enumerates independent Boolean support assignments.
+        let mut minimum = 0i64;
+        let mut span = 1u128;
+        let mut norm2 = 0u128;
+        for &(left, right) in &self.coefficient_basis {
+            let coefficient = scales
+                .0
+                .checked_mul(left)?
+                .checked_add(scales.1.checked_mul(right)?)?;
+            let absolute = coefficient.unsigned_abs() as u128;
+            span += absolute;
+            if span > mapper.config.max_fbs_size as u128 {
+                return None;
+            }
+            minimum += coefficient.min(0);
+            norm2 += absolute * absolute;
+        }
+        if mapper.config.max_norm2.is_some_and(|limit| norm2 > limit) {
             return None;
         }
-        let norm2 = self
-            .coefficient_basis
-            .iter()
-            .map(|(left, right)| {
-                let coefficient = (scales.0 * left + scales.1 * right).unsigned_abs() as u128;
-                coefficient * coefficient
-            })
-            .sum();
+
+        self.known.clear();
+        self.known.resize(span as usize, 2);
+        let mut energy = 0u128;
+        for row in rows {
+            let value = scales.0 * row.x + scales.1 * row.y;
+            let index = usize::try_from(value.checked_sub(minimum)?).ok()?;
+            let entry = self.known.get_mut(index)?;
+            if row.truth > 1 || (*entry != 2 && *entry != row.truth) {
+                return None;
+            }
+            *entry = row.truth;
+            self.multivalue_table.push(value);
+            let absolute = value.unsigned_abs() as u128;
+            energy += absolute.saturating_mul(absolute) * row.count as u128;
+        }
+        if self.multivalue_table.is_empty() {
+            return None;
+        }
         mapper
-            .config
-            .max_norm2
-            .is_none_or(|limit| norm2 <= limit)
-            .then_some(norm2)
+            .is_known_lut_valid(&self.known)
+            .then_some((norm2, energy))
     }
 
     fn independent_basis(&self) -> bool {
@@ -660,8 +752,16 @@ impl Mapper {
         let right_size = right.span() as i64;
         let left_is_zero = xy.iter().all(|(left, _)| *left == 0);
         let right_is_zero = xy.iter().all(|(_, right)| *right == 0);
-        let mut best: Option<(CandidateScore, Candidate)> = None;
-        let mut workspace = CandidateWorkspace::new(left, right, xy.len());
+        let rows = compact_candidate_rows(
+            xy,
+            truth_table,
+            [
+                (*left.multivalue_table.iter().min()?, left_size as usize),
+                (*right.multivalue_table.iter().min()?, right_size as usize),
+            ],
+        )?;
+        let mut best: Option<(CandidateScore, (i64, i64))> = None;
+        let mut workspace = CandidateWorkspace::new(left, right, rows.len());
         let independent_basis = workspace.independent_basis();
         let mut seen_coefficients = HashSet::new();
         for a in 0..=right_size {
@@ -681,7 +781,9 @@ impl Mapper {
                         continue;
                     }
                 }
-                let Some(merged_norm2) = workspace.evaluate(self, xy, truth_table, (a, b)) else {
+                let Some((merged_norm2, energy)) =
+                    workspace.evaluate(self, rows.iter().copied(), (a, b))
+                else {
                     continue;
                 };
                 let coefficient_bound = a.unsigned_abs() as u128 * (left_size - 1) as u128
@@ -696,29 +798,22 @@ impl Mapper {
                             &workspace.multivalue_table,
                         ),
                 );
-                let score = (
-                    reuse_cost,
-                    coefficient_bound,
-                    raw_energy(&workspace.multivalue_table),
-                    merged_norm2,
-                    a,
-                    b,
-                );
+                let score = (reuse_cost, coefficient_bound, energy, merged_norm2, a, b);
                 if best
                     .as_ref()
                     .is_none_or(|(best_score, _)| score < *best_score)
                 {
-                    best = Some((
-                        score,
-                        Candidate {
-                            scales: (a, b),
-                            multivalue_table: workspace.multivalue_table.clone(),
-                        },
-                    ));
+                    best = Some((score, (a, b)));
                 }
             }
         }
-        best.map(|(_, candidate)| candidate)
+        best.map(|(_, scales)| Candidate {
+            scales,
+            multivalue_table: xy
+                .iter()
+                .map(|(x, y)| scales.0 * x + scales.1 * y)
+                .collect(),
+        })
     }
 
     fn make_candidate(
@@ -729,8 +824,11 @@ impl Mapper {
         truth_table: &[u8],
         scales: (i64, i64),
     ) -> Option<Candidate> {
+        if xy.len() != truth_table.len() || xy.is_empty() {
+            return None;
+        }
         let mut workspace = CandidateWorkspace::new(left, right, xy.len());
-        workspace.evaluate(self, xy, truth_table, scales)?;
+        workspace.evaluate(self, candidate_rows(xy, truth_table), scales)?;
         Some(Candidate {
             scales,
             multivalue_table: workspace.multivalue_table,
@@ -917,6 +1015,11 @@ impl Mapper {
             }
             *entry = truth;
         }
+        self.is_known_lut_valid(known)
+    }
+
+    fn is_known_lut_valid(&self, known: &[u8]) -> bool {
+        let size = known.len();
         if size <= self.config.fbs_size {
             return true;
         }
@@ -1294,6 +1397,7 @@ fn table_span(table: &[i64]) -> usize {
     usize::try_from(maximum - minimum + 1).unwrap()
 }
 
+#[cfg(test)]
 fn raw_energy(table: &[i64]) -> u128 {
     table
         .iter()
@@ -1413,6 +1517,213 @@ mod tests {
         assert_equivalent(&bit, &lut);
         assert_eq!(lut.stats().bootstrap_count, 1);
         assert_eq!(lut.stats().max_lut_size, 3);
+    }
+
+    #[test]
+    fn fused_candidate_evaluation_matches_full_table_reference() {
+        let cone = |support: Vec<usize>, coefficients: Vec<i64>, truth_table: Vec<u8>| Cone {
+            multivalue_table: linear_table(&coefficients),
+            support,
+            coefficients,
+            truth_table,
+        };
+        let cases = [
+            (
+                cone(vec![1, 2], vec![1, 2], vec![0, 1, 1, 0]),
+                Cone::identity(3),
+            ),
+            (
+                cone(vec![1, 2], vec![2, -1], vec![0, 1, 1, 0]),
+                cone(vec![2, 1], vec![-2, 1], vec![1, 0, 0, 0]),
+            ),
+            (
+                cone(vec![1, 2], vec![1, -1], vec![0, 1, 1, 0]),
+                cone(vec![1, 2], vec![2, -2], vec![0, 1, 1, 0]),
+            ),
+            (Cone::constant(1), Cone::identity(1)),
+            (Cone::constant(0), Cone::constant(1)),
+            (
+                cone(vec![1, 2], vec![4, 1], vec![0, 0, 1, 1]),
+                Cone::constant(0),
+            ),
+        ];
+        for fbs_size in [2, 3, 4, 8] {
+            for max_fbs_size in [fbs_size, 2 * fbs_size] {
+                for max_norm2 in [None, Some(5)] {
+                    let mapper = Mapper::new(MapConfig {
+                        fbs_size,
+                        max_fbs_size,
+                        max_norm2,
+                        ..MapConfig::default()
+                    })
+                    .unwrap();
+                    for (left, right) in &cases {
+                        let support = union_support(&left.support, &right.support);
+                        for gate in 0..16 {
+                            let gate_table: Vec<_> =
+                                (0..4).map(|i| ((gate >> i) & 1) as u8).collect();
+                            let (xy, truth) =
+                                cone_composition_tables(left, right, &gate_table).unwrap();
+                            let mut workspace = CandidateWorkspace::new(left, right, xy.len());
+                            let rows = compact_candidate_rows(
+                                &xy,
+                                &truth,
+                                [
+                                    (*left.multivalue_table.iter().min().unwrap(), left.span()),
+                                    (*right.multivalue_table.iter().min().unwrap(), right.span()),
+                                ],
+                            )
+                            .unwrap();
+                            let mut compact_workspace =
+                                CandidateWorkspace::new(left, right, rows.len());
+                            for a in -3..=3 {
+                                for b in -3..=3 {
+                                    let values: Vec<_> =
+                                        xy.iter().map(|(x, y)| a * x + b * y).collect();
+                                    let coefficients = combined_coefficients_for_support(
+                                        left,
+                                        right,
+                                        (a, b),
+                                        &support,
+                                    );
+                                    let norm2 = coefficients_norm2(&coefficients);
+                                    let expected = (mapper.is_lut_valid(&truth, &values)
+                                        && max_norm2.is_none_or(|limit| norm2 <= limit))
+                                    .then(|| (norm2, raw_energy(&values)));
+                                    let actual = workspace.evaluate(
+                                        &mapper,
+                                        candidate_rows(&xy, &truth),
+                                        (a, b),
+                                    );
+                                    assert_eq!(
+                                        actual, expected,
+                                        "p={fbs_size}, max={max_fbs_size}, norm={max_norm2:?}, gate={gate}, scales=({a},{b}), left={left:?}, right={right:?}"
+                                    );
+                                    let compact_actual = compact_workspace.evaluate(
+                                        &mapper,
+                                        rows.iter().copied(),
+                                        (a, b),
+                                    );
+                                    assert_eq!(
+                                        compact_actual, expected,
+                                        "weighted rows, p={fbs_size}, max={max_fbs_size}, norm={max_norm2:?}, gate={gate}, scales=({a},{b})"
+                                    );
+                                    if actual.is_some() {
+                                        assert_eq!(workspace.multivalue_table, values);
+                                        assert_eq!(
+                                            compact_workspace.multivalue_table.len(),
+                                            rows.len()
+                                        );
+                                        assert_eq!(
+                                            compact_workspace.multivalue_table.iter().min(),
+                                            values.iter().min()
+                                        );
+                                        assert_eq!(
+                                            compact_workspace.multivalue_table.iter().max(),
+                                            values.iter().max()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_rejections_stop_before_materializing_the_full_table() {
+        let mapper = Mapper::new(MapConfig::default()).unwrap();
+        let left = Cone::identity(1);
+        let right = Cone::identity(2);
+        let (xy, truth) = cone_composition_tables(&left, &right, &[0, 0, 0, 1]).unwrap();
+        let mut workspace = CandidateWorkspace::new(&left, &right, xy.len());
+        assert!(
+            workspace
+                .evaluate(&mapper, candidate_rows(&xy, &truth), (6, 1))
+                .is_none()
+        );
+        assert!(workspace.multivalue_table.is_empty());
+        assert!(
+            workspace
+                .evaluate(&mapper, candidate_rows(&xy, &truth), (2, 1))
+                .is_some()
+        );
+        assert_eq!(workspace.multivalue_table, [0, 1, 2, 3]);
+        assert!(
+            workspace
+                .evaluate(&mapper, candidate_rows(&xy, &truth), (0, 0))
+                .is_none()
+        );
+        assert!(workspace.multivalue_table.len() < xy.len());
+    }
+
+    #[test]
+    fn compact_rows_preserve_weights_and_conflicting_truths_in_dense_and_sparse_ranges() {
+        let xy = [(0, 0), (1, 0), (1, 0), (1, 0)];
+        let truth = [0, 0, 1, 0];
+        let dense = compact_candidate_rows(&xy, &truth, [(0, 2), (0, 1)]).unwrap();
+        let sparse = compact_candidate_rows(&xy, &truth, [(0, 1000), (0, 1000)]).unwrap();
+        assert_eq!(dense, sparse);
+        assert_eq!(
+            dense.iter().map(|row| row.count).collect::<Vec<_>>(),
+            [1, 2, 1]
+        );
+        assert_eq!(dense[1].truth, 0);
+        assert_eq!(dense[2].truth, 1);
+        let mapper = Mapper::new(MapConfig::default()).unwrap();
+        let mut workspace =
+            CandidateWorkspace::new(&Cone::identity(1), &Cone::constant(0), dense.len());
+        assert!(
+            workspace
+                .evaluate(&mapper, dense.iter().copied(), (1, 0))
+                .is_none()
+        );
+        assert!(compact_candidate_rows(&xy, &[0], [(0, 2), (0, 1)]).is_none());
+        assert!(compact_candidate_rows(&[], &[], [(0, 2), (0, 1)]).is_none());
+        assert!(compact_candidate_rows(&xy, &[0, 0, 2, 0], [(0, 2), (0, 1)]).is_none());
+    }
+
+    #[test]
+    fn selected_candidate_expands_weighted_rows_in_assignment_order() {
+        let left = Cone {
+            support: vec![0, 1],
+            coefficients: vec![1, 1],
+            truth_table: vec![0, 0, 0, 1],
+            multivalue_table: vec![0, 1, 1, 2],
+        };
+        let right = Cone::identity(2);
+        let (xy, truth) = cone_composition_tables(&left, &right, &[0, 1, 1, 0]).unwrap();
+        let rows = compact_candidate_rows(&xy, &truth, [(0, 3), (0, 2)]).unwrap();
+        assert_eq!(xy.len(), 8);
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.iter().map(|row| row.count).sum::<usize>(), 8);
+        let environment = LutCircuit::default();
+        for multioutput_fbs in [false, true] {
+            let mapper = Mapper::new(MapConfig {
+                fbs_size: 4,
+                max_fbs_size: 8,
+                multioutput_fbs,
+                ..MapConfig::default()
+            })
+            .unwrap();
+            let candidate = mapper
+                .search_candidate(&environment, &left, &right, &xy, &truth, !multioutput_fbs)
+                .unwrap();
+            assert_eq!(
+                candidate.multivalue_table,
+                xy.iter()
+                    .map(|(x, y)| candidate.scales.0 * x + candidate.scales.1 * y)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(candidate.multivalue_table.len(), xy.len());
+            let mut workspace = CandidateWorkspace::new(&left, &right, rows.len());
+            let (_, energy) = workspace
+                .evaluate(&mapper, rows.iter().copied(), candidate.scales)
+                .unwrap();
+            assert_eq!(energy, raw_energy(&candidate.multivalue_table));
+        }
     }
 
     #[test]
