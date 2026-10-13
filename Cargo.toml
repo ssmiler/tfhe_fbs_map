@@ -5,10 +5,6 @@ edition = "2024"
 description = "Fast heuristics for mapping Boolean circuits to TFHE functional bootstraps"
 license = "MIT"
 
-[lib]
-name = "tfhe_fbs_map"
-path = "src/lib.rs"
-
 [[bin]]
 name = "fbs-map"
 path = "src/main.rs"

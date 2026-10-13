@@ -1,4 +1,4 @@
-use crate::circuit::{BitCircuit, BitNode, Signal};
+use crate::circuit::{BoolCircuit, BoolNode, BoolWire};
 use crate::lut::{LutCircuit, LutSignal};
 use std::collections::{HashMap, HashSet};
 
@@ -80,11 +80,69 @@ impl Cone {
 struct Candidate {
     scales: (i64, i64),
     multivalue_table: Vec<i64>,
-    merged_norm2: u128,
 }
 
 type CandidateScore = (u8, u128, u128, u128, i64, i64);
 type CompositionTables = (Vec<(i64, i64)>, Vec<u8>);
+type ConeUpdates = [Option<Cone>; 2];
+
+struct CandidateWorkspace {
+    coefficient_basis: Vec<(i64, i64)>,
+    multivalue_table: Vec<i64>,
+    known: Vec<u8>,
+}
+
+impl CandidateWorkspace {
+    fn new(left: &Cone, right: &Cone, table_size: usize) -> Self {
+        let support = union_support(&left.support, &right.support);
+        Self {
+            coefficient_basis: support
+                .iter()
+                .map(|node| coefficient_pair(left, right, *node))
+                .collect(),
+            multivalue_table: Vec::with_capacity(table_size),
+            known: Vec::new(),
+        }
+    }
+
+    fn evaluate(
+        &mut self,
+        mapper: &Mapper,
+        xy: &[(i64, i64)],
+        truth_table: &[u8],
+        scales: (i64, i64),
+    ) -> Option<u128> {
+        self.multivalue_table.clear();
+        self.multivalue_table
+            .extend(xy.iter().map(|(x, y)| scales.0 * x + scales.1 * y));
+        if !mapper.is_lut_valid_with_scratch(truth_table, &self.multivalue_table, &mut self.known) {
+            return None;
+        }
+        let norm2 = self
+            .coefficient_basis
+            .iter()
+            .map(|(left, right)| {
+                let coefficient = (scales.0 * left + scales.1 * right).unsigned_abs() as u128;
+                coefficient * coefficient
+            })
+            .sum();
+        mapper
+            .config
+            .max_norm2
+            .is_none_or(|limit| norm2 <= limit)
+            .then_some(norm2)
+    }
+
+    fn independent_basis(&self) -> bool {
+        let Some(&(first, second)) = self.coefficient_basis.iter().find(|pair| **pair != (0, 0))
+        else {
+            return false;
+        };
+        self.coefficient_basis.iter().any(|&(left, right)| {
+            i128::from(first) * i128::from(right) != i128::from(second) * i128::from(left)
+        })
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct CandidateCacheKey {
@@ -145,7 +203,7 @@ impl Mapper {
         Ok(Self { config })
     }
 
-    pub fn map(&self, circuit: &BitCircuit) -> Result<LutCircuit, String> {
+    pub fn map(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
         if self.config.coefficient_policy == CoefficientPolicy::Basic {
             let mapped = self.map_basic(circuit)?;
             if self
@@ -163,7 +221,11 @@ impl Mapper {
         self.map_once(circuit)
     }
 
-    fn schedule(&self, circuit: &BitCircuit, policy: SchedulePolicy) -> Result<Vec<usize>, String> {
+    fn schedule(
+        &self,
+        circuit: &BoolCircuit,
+        policy: SchedulePolicy,
+    ) -> Result<Vec<usize>, String> {
         match policy {
             SchedulePolicy::Original => Ok(circuit.topological_gates()),
             SchedulePolicy::Random { seed } => circuit.scheduled_gates_by_key(|id| {
@@ -172,14 +234,14 @@ impl Mapper {
         }
     }
 
-    fn map_once(&self, circuit: &BitCircuit) -> Result<LutCircuit, String> {
+    fn map_once(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
         let order = self.schedule(circuit, self.config.schedule_policy)?;
         let mut environment = LutCircuit::default();
         environment.set_multioutput_fbs(self.config.multioutput_fbs);
         let mut wires: Vec<Option<Cone>> = vec![None; circuit.nodes.len()];
         let mut candidate_cache = CandidateCache::new();
         for id in &circuit.inputs {
-            let BitNode::Input { name } = &circuit.nodes[*id] else {
+            let BoolNode::Input { name } = &circuit.nodes[*id] else {
                 unreachable!()
             };
             let LutSignal::Node(node) = environment.input(name) else {
@@ -191,49 +253,45 @@ impl Mapper {
         let mut gate_fanout = vec![0usize; circuit.nodes.len()];
         for node in &circuit.nodes {
             for input in node.inputs() {
-                if let Signal::Node(id) = input {
+                if let BoolWire::Node(id) = input {
                     gate_fanout[*id] += 1;
                 }
             }
         }
-        let forced_outputs: HashSet<_> = circuit
-            .outputs
-            .iter()
-            .filter_map(|(_, signal)| {
-                if let Signal::Node(id) = signal {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut forced_outputs = vec![false; circuit.nodes.len()];
+        for (_, output) in &circuit.outputs {
+            if let BoolWire::Node(id) = output {
+                forced_outputs[*id] = true;
+            }
+        }
 
         for gate_id in order {
-            let BitNode::Lut { inputs, table, .. } = &circuit.nodes[gate_id] else {
+            let BoolNode::Lut { inputs, table, .. } = &circuit.nodes[gate_id] else {
                 unreachable!()
             };
             let mut input_cones = Vec::with_capacity(inputs.len());
             for input in inputs {
                 input_cones.push(match input {
-                    Signal::Const(value) => Cone::constant(u8::from(*value)),
-                    Signal::Node(id) => wires[*id]
+                    BoolWire::Const(value) => Cone::constant(u8::from(*value)),
+                    BoolWire::Node(id) => wires[*id]
                         .clone()
                         .ok_or_else(|| format!("gate {gate_id} scheduled before input {id}"))?,
                 });
             }
 
             let (cone, updates) =
-                self.map_gate(&mut environment, &input_cones, table, &mut candidate_cache)?;
-            for (position, replacement) in updates {
-                if let Signal::Node(id) = inputs[position] {
+                self.map_gate(&mut environment, input_cones, table, &mut candidate_cache)?;
+            for (position, replacement) in updates.into_iter().enumerate() {
+                if let Some(replacement) = replacement
+                    && let BoolWire::Node(id) = inputs[position]
+                {
                     wires[id] = Some(replacement);
                 }
             }
 
             let eager_shared =
                 gate_fanout[gate_id] > 1 && cone.span().saturating_mul(2) > self.config.fbs_size;
-            let cone = if !self.config.multioutput_fbs
-                && (forced_outputs.contains(&gate_id) || eager_shared)
+            let cone = if !self.config.multioutput_fbs && (forced_outputs[gate_id] || eager_shared)
             {
                 self.bootstrap_cone(&mut environment, cone)?
             } else {
@@ -244,8 +302,8 @@ impl Mapper {
 
         for (name, output) in &circuit.outputs {
             let cone = match output {
-                Signal::Const(value) => Cone::constant(u8::from(*value)),
-                Signal::Node(id) => wires[*id]
+                BoolWire::Const(value) => Cone::constant(u8::from(*value)),
+                BoolWire::Node(id) => wires[*id]
                     .clone()
                     .ok_or_else(|| format!("output '{name}' was not mapped"))?,
             };
@@ -256,25 +314,25 @@ impl Mapper {
         Ok(environment)
     }
 
-    fn map_basic(&self, circuit: &BitCircuit) -> Result<LutCircuit, String> {
+    fn map_basic(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
         let mut environment = LutCircuit::default();
         environment.set_multioutput_fbs(self.config.multioutput_fbs);
         let mut wires = vec![LutSignal::Const(0); circuit.nodes.len()];
         for id in &circuit.inputs {
-            let BitNode::Input { name } = &circuit.nodes[*id] else {
+            let BoolNode::Input { name } = &circuit.nodes[*id] else {
                 unreachable!()
             };
             wires[*id] = environment.input(name);
         }
         for id in self.schedule(circuit, self.config.schedule_policy)? {
             wires[id] = match &circuit.nodes[id] {
-                BitNode::Input { .. } => unreachable!(),
-                BitNode::Lut { inputs, table, .. } => {
+                BoolNode::Input { .. } => unreachable!(),
+                BoolNode::Lut { inputs, table, .. } => {
                     let signals: Vec<_> = inputs
                         .iter()
                         .map(|input| match input {
-                            Signal::Const(value) => LutSignal::Const(i64::from(*value)),
-                            Signal::Node(input) => wires[*input],
+                            BoolWire::Const(value) => LutSignal::Const(i64::from(*value)),
+                            BoolWire::Node(input) => wires[*input],
                         })
                         .collect();
                     match signals.as_slice() {
@@ -341,8 +399,8 @@ impl Mapper {
         }
         for (name, output) in &circuit.outputs {
             let signal = match output {
-                Signal::Const(value) => LutSignal::Const(i64::from(*value)),
-                Signal::Node(id) => wires[*id],
+                BoolWire::Const(value) => LutSignal::Const(i64::from(*value)),
+                BoolWire::Node(id) => wires[*id],
             };
             environment.add_output(name.clone(), signal);
         }
@@ -353,12 +411,13 @@ impl Mapper {
     fn map_gate(
         &self,
         environment: &mut LutCircuit,
-        inputs: &[Cone],
+        mut inputs: Vec<Cone>,
         gate_table: &[u8],
         candidate_cache: &mut CandidateCache,
-    ) -> Result<(Cone, HashMap<usize, Cone>), String> {
-        match inputs {
-            [cone] => {
+    ) -> Result<(Cone, ConeUpdates), String> {
+        match inputs.len() {
+            1 => {
+                let cone = inputs.pop().unwrap();
                 if gate_table.len() != 2 {
                     return Err("unary gate must have a two-entry table".to_owned());
                 }
@@ -368,22 +427,26 @@ impl Mapper {
                     .map(|value| gate_table[*value as usize])
                     .collect();
                 if all_equal(&truth_table) {
-                    return Ok((Cone::constant(truth_table[0]), HashMap::new()));
+                    return Ok((Cone::constant(truth_table[0]), [None, None]));
                 }
                 let result = Cone {
                     truth_table,
-                    ..cone.clone()
+                    ..cone
                 };
                 self.validate_cone(&result)?;
-                Ok((result, HashMap::new()))
+                Ok((result, [None, None]))
             }
-            [left, right] => self.map_binary_gate(
-                environment,
-                left.clone(),
-                right.clone(),
-                gate_table.to_vec(),
-                candidate_cache,
-            ),
+            2 => {
+                let right = inputs.pop().unwrap();
+                let left = inputs.pop().unwrap();
+                self.map_binary_gate(
+                    environment,
+                    left,
+                    right,
+                    gate_table.to_vec(),
+                    candidate_cache,
+                )
+            }
             _ => Err("mapper supports only unary and binary gates".to_owned()),
         }
     }
@@ -395,7 +458,7 @@ impl Mapper {
         mut right: Cone,
         mut gate_table: Vec<u8>,
         candidate_cache: &mut CandidateCache,
-    ) -> Result<(Cone, HashMap<usize, Cone>), String> {
+    ) -> Result<(Cone, ConeUpdates), String> {
         if gate_table.len() != 4 {
             return Err("binary gate must have a four-entry table".to_owned());
         }
@@ -410,12 +473,12 @@ impl Mapper {
                 &mut gate_table,
             );
         }
-        let mut updates = HashMap::new();
+        let mut updates = [None, None];
 
         let support_size = union_support_size(&left.support, &right.support);
         if support_size > self.config.max_truth_table_inputs {
             left = self.bootstrap_cone(environment, left)?;
-            updates.insert(left_position, left.clone());
+            updates[left_position] = Some(left.clone());
             switch_inputs(
                 &mut left,
                 &mut right,
@@ -427,7 +490,7 @@ impl Mapper {
                 > self.config.max_truth_table_inputs
             {
                 left = self.bootstrap_cone(environment, left)?;
-                updates.insert(left_position, left.clone());
+                updates[left_position] = Some(left.clone());
             }
         }
 
@@ -470,12 +533,12 @@ impl Mapper {
 
         if all_equal(&truth_left) {
             left = self.bootstrap_cone(environment, left)?;
-            updates.insert(left_position, left);
+            updates[left_position] = Some(left);
             return Ok((Cone::constant(truth_left[0]), updates));
         }
         if all_equal(&truth_right) {
             right = self.bootstrap_cone(environment, right)?;
-            updates.insert(right_position, right);
+            updates[right_position] = Some(right);
             return Ok((Cone::constant(truth_right[0]), updates));
         }
 
@@ -489,17 +552,17 @@ impl Mapper {
         match decision {
             BootstrapDecision::Left => {
                 left = self.bootstrap_cone(environment, left)?;
-                updates.insert(left_position, left.clone());
+                updates[left_position] = Some(left.clone());
             }
             BootstrapDecision::Right => {
                 right = self.bootstrap_cone(environment, right)?;
-                updates.insert(right_position, right.clone());
+                updates[right_position] = Some(right.clone());
             }
             BootstrapDecision::Both => {
                 left = self.bootstrap_cone(environment, left)?;
                 right = self.bootstrap_cone(environment, right)?;
-                updates.insert(left_position, left.clone());
-                updates.insert(right_position, right.clone());
+                updates[left_position] = Some(left.clone());
+                updates[right_position] = Some(right.clone());
             }
         }
 
@@ -598,33 +661,46 @@ impl Mapper {
         let left_is_zero = xy.iter().all(|(left, _)| *left == 0);
         let right_is_zero = xy.iter().all(|(_, right)| *right == 0);
         let mut best: Option<(CandidateScore, Candidate)> = None;
+        let mut workspace = CandidateWorkspace::new(left, right, xy.len());
+        let independent_basis = workspace.independent_basis();
         let mut seen_coefficients = HashSet::new();
         for a in 0..=right_size {
             for b in -left_size..=left_size {
                 if !is_candidate_scale_pair(a, b, left_is_zero, right_is_zero, canonical_sign) {
                     continue;
                 }
-                let mut coefficient_key = combined_coefficients(left, right, (a, b));
-                normalize_coefficient_key(&mut coefficient_key, canonical_sign);
-                if !seen_coefficients.insert(coefficient_key) {
-                    continue;
+                // Primitive scale pairs are already unique on independent bases.
+                if !independent_basis {
+                    let mut coefficient_key: Vec<_> = workspace
+                        .coefficient_basis
+                        .iter()
+                        .map(|(left, right)| a * left + b * right)
+                        .collect();
+                    normalize_coefficient_key(&mut coefficient_key, canonical_sign);
+                    if !seen_coefficients.insert(coefficient_key) {
+                        continue;
+                    }
                 }
-                let Some(candidate) = self.make_candidate(left, right, xy, truth_table, (a, b))
-                else {
+                let Some(merged_norm2) = workspace.evaluate(self, xy, truth_table, (a, b)) else {
                     continue;
                 };
-                let coefficient_bound = a.unsigned_abs() as u128
-                    * left.span().saturating_sub(1) as u128
-                    + b.unsigned_abs() as u128 * right.span().saturating_sub(1) as u128;
+                let coefficient_bound = a.unsigned_abs() as u128 * (left_size - 1) as u128
+                    + b.unsigned_abs() as u128 * (right_size - 1) as u128;
                 let reuse_cost = u8::from(
                     !self.config.multioutput_fbs
-                        || !self.candidate_reuses_bootstrap(environment, left, right, &candidate),
+                        || !self.candidate_reuses_bootstrap(
+                            environment,
+                            left,
+                            right,
+                            (a, b),
+                            &workspace.multivalue_table,
+                        ),
                 );
                 let score = (
                     reuse_cost,
                     coefficient_bound,
-                    raw_energy(&candidate.multivalue_table),
-                    candidate.merged_norm2,
+                    raw_energy(&workspace.multivalue_table),
+                    merged_norm2,
                     a,
                     b,
                 );
@@ -632,7 +708,13 @@ impl Mapper {
                     .as_ref()
                     .is_none_or(|(best_score, _)| score < *best_score)
                 {
-                    best = Some((score, candidate));
+                    best = Some((
+                        score,
+                        Candidate {
+                            scales: (a, b),
+                            multivalue_table: workspace.multivalue_table.clone(),
+                        },
+                    ));
                 }
             }
         }
@@ -647,26 +729,11 @@ impl Mapper {
         truth_table: &[u8],
         scales: (i64, i64),
     ) -> Option<Candidate> {
-        let multivalue_table: Vec<_> = xy
-            .iter()
-            .map(|(x, y)| scales.0 * x + scales.1 * y)
-            .collect();
-        if !self.is_lut_valid(truth_table, &multivalue_table) {
-            return None;
-        }
-        let merged_coefficients = combined_coefficients(left, right, scales);
-        let merged_norm2 = coefficients_norm2(&merged_coefficients);
-        if self
-            .config
-            .max_norm2
-            .is_some_and(|limit| merged_norm2 > limit)
-        {
-            return None;
-        }
+        let mut workspace = CandidateWorkspace::new(left, right, xy.len());
+        workspace.evaluate(self, xy, truth_table, scales)?;
         Some(Candidate {
             scales,
-            multivalue_table,
-            merged_norm2,
+            multivalue_table: workspace.multivalue_table,
         })
     }
 
@@ -677,12 +744,7 @@ impl Mapper {
         candidate: Candidate,
         truth_table: Vec<u8>,
     ) -> Result<Cone, String> {
-        let mut support = left.support.clone();
-        for node in &right.support {
-            if !support.contains(node) {
-                support.push(*node);
-            }
-        }
+        let support = union_support(&left.support, &right.support);
         let coefficients =
             combined_coefficients_for_support(&left, &right, candidate.scales, &support);
         let cone = simplify_cone(Cone {
@@ -700,17 +762,12 @@ impl Mapper {
         environment: &LutCircuit,
         left: &Cone,
         right: &Cone,
-        candidate: &Candidate,
+        scales: (i64, i64),
+        multivalue_table: &[i64],
     ) -> bool {
-        let mut support = left.support.clone();
-        for node in &right.support {
-            if !support.contains(node) {
-                support.push(*node);
-            }
-        }
-        let coefficients =
-            combined_coefficients_for_support(left, right, candidate.scales, &support);
-        let minimum = *candidate.multivalue_table.iter().min().unwrap();
+        let support = union_support(&left.support, &right.support);
+        let coefficients = combined_coefficients_for_support(left, right, scales, &support);
+        let minimum = *multivalue_table.iter().min().unwrap();
         let terms: Vec<_> = coefficients
             .iter()
             .zip(&support)
@@ -827,23 +884,56 @@ impl Mapper {
     }
 
     fn is_lut_valid(&self, truth_table: &[u8], multivalue_table: &[i64]) -> bool {
-        let mut zero_values = HashSet::new();
-        let mut one_values = HashSet::new();
-        for (truth, value) in truth_table.iter().zip(multivalue_table) {
-            if *truth == 0 {
-                zero_values.insert(*value);
-            } else {
-                one_values.insert(*value);
-            }
-        }
-        if zero_values.iter().any(|value| one_values.contains(value)) {
+        self.is_lut_valid_with_scratch(truth_table, multivalue_table, &mut Vec::new())
+    }
+
+    fn is_lut_valid_with_scratch(
+        &self,
+        truth_table: &[u8],
+        multivalue_table: &[i64],
+        known: &mut Vec<u8>,
+    ) -> bool {
+        if truth_table.len() != multivalue_table.len() || multivalue_table.is_empty() {
             return false;
         }
-        if table_span(multivalue_table) <= self.config.fbs_size {
+        let minimum = *multivalue_table.iter().min().unwrap();
+        let maximum = *multivalue_table.iter().max().unwrap();
+        let Some(size) = maximum
+            .checked_sub(minimum)
+            .and_then(|span| span.checked_add(1))
+            .and_then(|size| usize::try_from(size).ok())
+        else {
+            return false;
+        };
+        if size > self.config.max_fbs_size {
+            return false;
+        }
+        known.clear();
+        known.resize(size, 2);
+        for (&truth, &value) in truth_table.iter().zip(multivalue_table) {
+            let entry = &mut known[(value - minimum) as usize];
+            if truth > 1 || (*entry != 2 && *entry != truth) {
+                return false;
+            }
+            *entry = truth;
+        }
+        if size <= self.config.fbs_size {
             return true;
         }
-        self.composed_bootstrap_table(truth_table, multivalue_table)
-            .is_some()
+
+        // A completion is antipodal, or has a uniformly zero/one overlap.
+        let mut antipodal = true;
+        let mut all_zero = true;
+        let mut all_one = true;
+        for (&left, &right) in known[..size - self.config.fbs_size]
+            .iter()
+            .zip(&known[self.config.fbs_size..])
+        {
+            antipodal &= left == 2 || right == 2 || left != right;
+            all_zero &= left != 1 && right != 1;
+            all_one &= left != 0 && right != 0;
+        }
+        antipodal || all_zero || all_one
     }
 
     fn bootstrap_table(
@@ -947,25 +1037,40 @@ fn union_support_size(left: &[usize], right: &[usize]) -> usize {
     left.len() + right.iter().filter(|node| !left.contains(node)).count()
 }
 
+fn union_support(left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut support = left.to_vec();
+    support.extend(right.iter().filter(|node| !left.contains(node)).copied());
+    support
+}
+
 fn cone_composition_tables(
     left: &Cone,
     right: &Cone,
     gate_table: &[u8],
 ) -> Result<CompositionTables, String> {
-    let mut support = left.support.clone();
-    for node in &right.support {
-        if !support.contains(node) {
-            support.push(*node);
-        }
-    }
+    let support = union_support(&left.support, &right.support);
     let count = 1usize
         .checked_shl(support.len() as u32)
         .ok_or_else(|| "truth table is too large".to_owned())?;
     let mut xy = Vec::with_capacity(count);
     let mut truth_table = Vec::with_capacity(count);
+    let right_shifts: Vec<_> = right
+        .support
+        .iter()
+        .map(|node| {
+            support.len()
+                - support
+                    .iter()
+                    .position(|candidate| candidate == node)
+                    .unwrap()
+                - 1
+        })
+        .collect();
     for assignment in 0..count {
-        let left_index = projected_index(assignment, support.len(), &support, &left.support);
-        let right_index = projected_index(assignment, support.len(), &support, &right.support);
+        let left_index = assignment >> (support.len() - left.support.len());
+        let right_index = right_shifts
+            .iter()
+            .fold(0, |index, shift| (index << 1) | ((assignment >> shift) & 1));
         let x = left.multivalue_table[left_index];
         let y = right.multivalue_table[right_index];
         let gate_index =
@@ -974,32 +1079,6 @@ fn cone_composition_tables(
         truth_table.push(gate_table[gate_index]);
     }
     Ok((xy, truth_table))
-}
-
-fn projected_index(
-    assignment: usize,
-    union_len: usize,
-    union: &[usize],
-    subset: &[usize],
-) -> usize {
-    subset.iter().fold(0usize, |index, node| {
-        let position = union
-            .iter()
-            .position(|candidate| candidate == node)
-            .unwrap();
-        let bit = (assignment >> (union_len - position - 1)) & 1;
-        (index << 1) | bit
-    })
-}
-
-fn combined_coefficients(left: &Cone, right: &Cone, scales: (i64, i64)) -> Vec<i64> {
-    let mut support = left.support.clone();
-    for node in &right.support {
-        if !support.contains(node) {
-            support.push(*node);
-        }
-    }
-    combined_coefficients_for_support(left, right, scales, &support)
 }
 
 fn combined_coefficients_for_support(
@@ -1011,21 +1090,21 @@ fn combined_coefficients_for_support(
     support
         .iter()
         .map(|node| {
-            let left_coefficient = left
-                .support
-                .iter()
-                .position(|candidate| candidate == node)
-                .map(|position| left.coefficients[position])
-                .unwrap_or(0);
-            let right_coefficient = right
-                .support
-                .iter()
-                .position(|candidate| candidate == node)
-                .map(|position| right.coefficients[position])
-                .unwrap_or(0);
+            let (left_coefficient, right_coefficient) = coefficient_pair(left, right, *node);
             scales.0 * left_coefficient + scales.1 * right_coefficient
         })
         .collect()
+}
+
+fn coefficient_pair(left: &Cone, right: &Cone, node: usize) -> (i64, i64) {
+    let coefficient = |cone: &Cone| {
+        cone.support
+            .iter()
+            .position(|candidate| *candidate == node)
+            .map(|position| cone.coefficients[position])
+            .unwrap_or(0)
+    };
+    (coefficient(left), coefficient(right))
 }
 
 fn simplify_cone(mut cone: Cone) -> Result<Cone, String> {
@@ -1119,31 +1198,39 @@ fn canonicalize_candidate_cache_key(
         ),
     ];
     for (basis, _, sign) in &mut bases {
-        let negated: Vec<_> = basis.iter().map(|value| -*value).collect();
-        if negated.as_slice() < basis.as_slice() {
-            *basis = negated;
+        if basis
+            .iter()
+            .find(|value| **value != 0)
+            .is_some_and(|value| *value > 0)
+        {
+            for value in basis {
+                *value = -*value;
+            }
             *sign = -1;
         }
     }
     if bases[1].0 < bases[0].0 {
         bases.swap(0, 1);
     }
+    let [
+        (first_basis, first_position, first_sign),
+        (second_basis, second_position, second_sign),
+    ] = bases;
     (
         CandidateCacheKey {
             truth_table: canonical_truth_table(truth_table),
-            first_basis: bases[0].0.clone(),
-            second_basis: bases[1].0.clone(),
+            first_basis,
+            second_basis,
         },
         CandidateCacheTransform {
-            canonical_to_original: [(bases[0].1, bases[0].2), (bases[1].1, bases[1].2)],
+            canonical_to_original: [(first_position, first_sign), (second_position, second_sign)],
         },
     )
 }
 
 fn canonical_truth_table(truth_table: &[u8]) -> Vec<u8> {
-    let complemented: Vec<_> = truth_table.iter().map(|value| 1 - value).collect();
-    if complemented.as_slice() < truth_table {
-        complemented
+    if truth_table.first() == Some(&1) {
+        truth_table.iter().map(|value| 1 - value).collect()
     } else {
         truth_table.to_vec()
     }
@@ -1246,8 +1333,8 @@ mod tests {
         source: &str,
         fbs_size: usize,
         policy: CoefficientPolicy,
-    ) -> (BitCircuit, LutCircuit) {
-        let circuit = BitCircuit::parse_blif(source).unwrap();
+    ) -> (BoolCircuit, LutCircuit) {
+        let circuit = BoolCircuit::parse_blif(source).unwrap();
         let config = MapConfig {
             fbs_size,
             max_fbs_size: 2 * fbs_size,
@@ -1258,7 +1345,7 @@ mod tests {
         (circuit, mapped)
     }
 
-    fn assert_equivalent(bit: &BitCircuit, lut: &LutCircuit) {
+    fn assert_equivalent(bit: &BoolCircuit, lut: &LutCircuit) {
         for inputs in bit.exhaustive_inputs().unwrap() {
             assert_eq!(
                 bit.evaluate(&inputs).unwrap(),
@@ -1306,7 +1393,7 @@ mod tests {
             inverted = NOT(a)
             y = XOR(inverted, a)
         "#;
-        let circuit = BitCircuit::parse_bench(source).unwrap();
+        let circuit = BoolCircuit::parse_bench(source).unwrap();
         let mapped = Mapper::new(MapConfig {
             fbs_size: 3,
             max_fbs_size: 6,
@@ -1379,6 +1466,11 @@ mod tests {
                     });
                     let completed = mapper.composed_bootstrap_table(&truth, &values);
                     assert_eq!(
+                        mapper.is_lut_valid(&truth, &values),
+                        can_complete,
+                        "p={fbs_size}, known={known:?}"
+                    );
+                    assert_eq!(
                         completed.is_some(),
                         can_complete,
                         "p={fbs_size}, known={known:?}"
@@ -1399,6 +1491,10 @@ mod tests {
     #[test]
     fn sparse_test_vectors_reject_conflicting_reachable_values_and_limits() {
         let mapper = Mapper::new(MapConfig::default()).unwrap();
+        assert!(!mapper.is_lut_valid(&[], &[]));
+        assert!(!mapper.is_lut_valid(&[0], &[0, 1]));
+        assert!(!mapper.is_lut_valid(&[2], &[0]));
+        assert!(!mapper.is_lut_valid(&[0, 1], &[i64::MIN, i64::MAX]));
         assert!(!mapper.is_lut_valid(&[0, 1], &[0, 0]));
         assert!(mapper.bootstrap_table(&[0, 1], &[0, 0]).is_err());
         assert!(!mapper.is_lut_valid(&[0, 1, 0, 1], &[0, 1, 3, 4]));
@@ -1466,7 +1562,7 @@ mod tests {
             -1 1
             .end
         "#;
-        let circuit = BitCircuit::parse_blif(source).unwrap();
+        let circuit = BoolCircuit::parse_blif(source).unwrap();
         let mapped = Mapper::new(MapConfig {
             fbs_size: 3,
             max_fbs_size: 6,
@@ -1483,20 +1579,20 @@ mod tests {
 
     #[test]
     fn basic_multioutput_mode_supports_all_binary_truth_tables_at_size_two() {
-        let mut circuit = BitCircuit::default();
+        let mut circuit = BoolCircuit::default();
         for name in ["a", "b"] {
             circuit.inputs.push(circuit.nodes.len());
-            circuit.nodes.push(BitNode::Input { name: name.into() });
+            circuit.nodes.push(BoolNode::Input { name: name.into() });
         }
         for truth in 0..16 {
             let id = circuit.nodes.len();
             let name = format!("y{truth}");
-            circuit.nodes.push(BitNode::Lut {
+            circuit.nodes.push(BoolNode::Lut {
                 name: name.clone(),
-                inputs: vec![Signal::Node(0), Signal::Node(1)],
+                inputs: vec![BoolWire::Node(0), BoolWire::Node(1)],
                 table: (0..4).map(|index| ((truth >> index) & 1) as u8).collect(),
             });
-            circuit.outputs.push((name, Signal::Node(id)));
+            circuit.outputs.push((name, BoolWire::Node(id)));
         }
         for multioutput_fbs in [false, true] {
             let mapped = Mapper::new(MapConfig {
@@ -1531,7 +1627,7 @@ mod tests {
             10 1
             .end
         "#;
-        let circuit = BitCircuit::parse_blif(source).unwrap();
+        let circuit = BoolCircuit::parse_blif(source).unwrap();
         let mapped = Mapper::new(MapConfig {
             fbs_size: 3,
             max_fbs_size: 6,
@@ -1564,7 +1660,7 @@ mod tests {
             11 1
             .end
         "#;
-        let bit = BitCircuit::parse_blif(source).unwrap();
+        let bit = BoolCircuit::parse_blif(source).unwrap();
         for schedule_policy in [SchedulePolicy::Original, SchedulePolicy::Random { seed: 7 }] {
             let mapper = Mapper::new(MapConfig {
                 fbs_size: 3,
@@ -1595,7 +1691,7 @@ mod tests {
             11 1
             .end
         "#;
-        let circuit = BitCircuit::parse_blif(source).unwrap();
+        let circuit = BoolCircuit::parse_blif(source).unwrap();
         let mapper = Mapper::new(MapConfig::default()).unwrap();
         let original = mapper.schedule(&circuit, SchedulePolicy::Original).unwrap();
         assert!((0..8).any(|seed| {
@@ -1630,6 +1726,54 @@ mod tests {
     }
 
     #[test]
+    fn composition_preserves_support_order_with_shared_and_permuted_inputs() {
+        let cone = |support: Vec<usize>| {
+            let coefficients: Vec<_> = (0..support.len()).map(|i| 1 << i).collect();
+            let multivalue_table = linear_table(&coefficients);
+            let truth_table = multivalue_table
+                .iter()
+                .map(|value| (value % 2) as u8)
+                .collect();
+            Cone {
+                support,
+                coefficients,
+                multivalue_table,
+                truth_table,
+            }
+        };
+        let left = cone(vec![8, 3]);
+        for support in [vec![], vec![8], vec![3, 8], vec![7, 8], vec![8, 7, 3]] {
+            let right = cone(support);
+            let union = union_support(&left.support, &right.support);
+            let project = |assignment: usize, subset: &[usize]| {
+                subset.iter().fold(0, |index, node| {
+                    let position = union
+                        .iter()
+                        .position(|candidate| candidate == node)
+                        .unwrap();
+                    (index << 1) | ((assignment >> (union.len() - position - 1)) & 1)
+                })
+            };
+            let (xy, truth) = cone_composition_tables(&left, &right, &[0, 1, 1, 0]).unwrap();
+            for assignment in 0..xy.len() {
+                let left_index = project(assignment, &left.support);
+                let right_index = project(assignment, &right.support);
+                assert_eq!(
+                    xy[assignment],
+                    (
+                        left.multivalue_table[left_index],
+                        right.multivalue_table[right_index]
+                    )
+                );
+                assert_eq!(
+                    truth[assignment],
+                    left.truth_table[left_index] ^ right.truth_table[right_index]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn candidate_scale_filter_removes_projective_symmetries() {
         assert!(is_candidate_scale_pair(1, -2, false, false, true));
         assert!(is_candidate_scale_pair(0, 1, false, false, true));
@@ -1638,6 +1782,53 @@ mod tests {
         assert!(!is_candidate_scale_pair(2, 2, false, false, true));
         assert!(!is_candidate_scale_pair(1, 0, true, false, true));
         assert!(!is_candidate_scale_pair(1, 1, false, true, true));
+    }
+
+    #[test]
+    fn independent_bases_need_no_normalized_coefficient_deduplication() {
+        for basis in [
+            vec![(1, 0), (0, 1)],
+            vec![(2, -1), (3, 2)],
+            vec![(0, 0), (-2, 3), (1, 4)],
+        ] {
+            let workspace = CandidateWorkspace {
+                coefficient_basis: basis,
+                multivalue_table: Vec::new(),
+                known: Vec::new(),
+            };
+            assert!(workspace.independent_basis());
+            for canonical_sign in [false, true] {
+                let mut seen = HashSet::new();
+                for a in 0..=8 {
+                    for b in -8..=8 {
+                        if is_candidate_scale_pair(a, b, false, false, canonical_sign) {
+                            let mut key: Vec<_> = workspace
+                                .coefficient_basis
+                                .iter()
+                                .map(|(left, right)| a * left + b * right)
+                                .collect();
+                            normalize_coefficient_key(&mut key, canonical_sign);
+                            assert!(seen.insert(key), "duplicate scales ({a}, {b})");
+                        }
+                    }
+                }
+            }
+        }
+        for basis in [
+            vec![],
+            vec![(0, 0)],
+            vec![(1, 2), (-2, -4)],
+            vec![(0, 1), (0, -2)],
+        ] {
+            assert!(
+                !CandidateWorkspace {
+                    coefficient_basis: basis,
+                    multivalue_table: Vec::new(),
+                    known: Vec::new(),
+                }
+                .independent_basis()
+            );
+        }
     }
 
     #[test]
@@ -1652,7 +1843,7 @@ mod tests {
             11 1
             .end
         "#;
-        let bit = BitCircuit::parse_blif(source).unwrap();
+        let bit = BoolCircuit::parse_blif(source).unwrap();
         let mapped = Mapper::new(MapConfig {
             fbs_size: 8,
             max_fbs_size: 16,
@@ -1670,10 +1861,10 @@ mod tests {
     fn random_dags_are_equivalent_under_supported_policies() {
         let mut state = 0x5eed_cafe_f00d_beefu64;
         for circuit_index in 0..12 {
-            let mut circuit = BitCircuit::default();
+            let mut circuit = BoolCircuit::default();
             for input in 0..6 {
                 let id = circuit.nodes.len();
-                circuit.nodes.push(BitNode::Input {
+                circuit.nodes.push(BoolNode::Input {
                     name: format!("i{input}"),
                 });
                 circuit.inputs.push(id);
@@ -1694,9 +1885,9 @@ mod tests {
                 if all_equal(&table) {
                     table[3] ^= 1;
                 }
-                circuit.nodes.push(BitNode::Lut {
+                circuit.nodes.push(BoolNode::Lut {
                     name: format!("c{circuit_index}_g{gate}"),
-                    inputs: vec![Signal::Node(left), Signal::Node(right)],
+                    inputs: vec![BoolWire::Node(left), BoolWire::Node(right)],
                     table,
                 });
             }
@@ -1704,7 +1895,7 @@ mod tests {
                 let id = circuit.nodes.len() - 1 - output * 3;
                 circuit
                     .outputs
-                    .push((format!("o{output}"), Signal::Node(id)));
+                    .push((format!("o{output}"), BoolWire::Node(id)));
             }
 
             for (coefficient_policy, schedule_policy) in [

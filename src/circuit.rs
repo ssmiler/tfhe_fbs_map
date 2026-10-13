@@ -3,31 +3,31 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Signal {
+pub enum BoolWire {
     Const(bool),
     Node(usize),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BitNode {
+pub enum BoolNode {
     Input {
         name: String,
     },
     Lut {
         name: String,
-        inputs: Vec<Signal>,
+        inputs: Vec<BoolWire>,
         table: Vec<u8>,
     },
 }
 
-impl BitNode {
+impl BoolNode {
     pub fn name(&self) -> &str {
         match self {
             Self::Input { name } | Self::Lut { name, .. } => name,
         }
     }
 
-    pub fn inputs(&self) -> &[Signal] {
+    pub fn inputs(&self) -> &[BoolWire] {
         match self {
             Self::Input { .. } => &[],
             Self::Lut { inputs, .. } => inputs,
@@ -36,34 +36,13 @@ impl BitNode {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct BitCircuit {
-    pub nodes: Vec<BitNode>,
+pub struct BoolCircuit {
+    pub nodes: Vec<BoolNode>,
     pub inputs: Vec<usize>,
-    pub outputs: Vec<(String, Signal)>,
+    pub outputs: Vec<(String, BoolWire)>,
 }
 
-impl BitCircuit {
-    pub fn parse_file(path: impl AsRef<Path>, input_type: &str) -> Result<Self, String> {
-        let path = path.as_ref();
-        let source =
-            fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let input_type = if input_type == "auto" {
-            match path.extension().and_then(|extension| extension.to_str()) {
-                Some(extension) if extension.eq_ignore_ascii_case("bench") => "bench",
-                _ => "blif",
-            }
-        } else {
-            input_type
-        };
-        let circuit = match input_type {
-            "blif" => Self::parse_blif(&source),
-            "bench" => Self::parse_bench(&source),
-            "bristol" => Self::parse_bristol(&source),
-            value => Err(format!("unknown input type '{value}'")),
-        };
-        circuit.map_err(|error| format!("{}: {error}", path.display()))
-    }
-
+impl BoolCircuit {
     pub fn parse_blif_file(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let source =
@@ -74,9 +53,9 @@ impl BitCircuit {
     pub fn parse_blif(source: &str) -> Result<Self, String> {
         let lines = logical_lines(source);
         let mut circuit = Self::default();
-        let mut wires: HashMap<String, Signal> = HashMap::from([
-            ("0".to_owned(), Signal::Const(false)),
-            ("1".to_owned(), Signal::Const(true)),
+        let mut wires: HashMap<String, BoolWire> = HashMap::from([
+            ("0".to_owned(), BoolWire::Const(false)),
+            ("1".to_owned(), BoolWire::Const(true)),
         ]);
         let mut output_names = Vec::new();
         let mut i = 0;
@@ -96,11 +75,11 @@ impl BitCircuit {
                             return Err(format!("duplicate input '{name}'"));
                         }
                         let id = circuit.nodes.len();
-                        circuit.nodes.push(BitNode::Input {
+                        circuit.nodes.push(BoolNode::Input {
                             name: (*name).to_owned(),
                         });
                         circuit.inputs.push(id);
-                        wires.insert((*name).to_owned(), Signal::Node(id));
+                        wires.insert((*name).to_owned(), BoolWire::Node(id));
                     }
                     i += 1;
                 }
@@ -144,15 +123,15 @@ impl BitCircuit {
                         .map_err(|e| format!("gate '{output}': {e}"))?;
 
                     let signal = if input_names.is_empty() {
-                        Signal::Const(table[0] != 0)
+                        BoolWire::Const(table[0] != 0)
                     } else {
                         let id = circuit.nodes.len();
-                        circuit.nodes.push(BitNode::Lut {
+                        circuit.nodes.push(BoolNode::Lut {
                             name: output.clone(),
                             inputs,
                             table,
                         });
-                        Signal::Node(id)
+                        BoolWire::Node(id)
                     };
                     wires.insert(output, signal);
                 }
@@ -187,9 +166,9 @@ impl BitCircuit {
     pub fn parse_bench(source: &str) -> Result<Self, String> {
         let lines = logical_lines(source);
         let mut circuit = Self::default();
-        let mut wires = HashMap::<String, Signal>::from([
-            ("FALSE".to_owned(), Signal::Const(false)),
-            ("TRUE".to_owned(), Signal::Const(true)),
+        let mut wires = HashMap::<String, BoolWire>::from([
+            ("FALSE".to_owned(), BoolWire::Const(false)),
+            ("TRUE".to_owned(), BoolWire::Const(true)),
         ]);
         let mut output_names = Vec::new();
 
@@ -227,11 +206,11 @@ impl BitCircuit {
                         return Err(format!("duplicate input '{name}'"));
                     }
                     let id = circuit.nodes.len();
-                    circuit.nodes.push(BitNode::Input {
+                    circuit.nodes.push(BoolNode::Input {
                         name: name.to_owned(),
                     });
                     circuit.inputs.push(id);
-                    wires.insert(name.to_owned(), Signal::Node(id));
+                    wires.insert(name.to_owned(), BoolWire::Node(id));
                 }
                 "OUTPUT" => output_names.push(name.to_owned()),
                 _ => return Err(format!("unexpected BENCH declaration '{declaration}'")),
@@ -286,11 +265,11 @@ impl BitCircuit {
         let mut wires = vec![None; wire_count];
         for (wire, slot) in wires.iter_mut().enumerate().take(input_count) {
             let id = circuit.nodes.len();
-            circuit.nodes.push(BitNode::Input {
+            circuit.nodes.push(BoolNode::Input {
                 name: format!("i_{wire}"),
             });
             circuit.inputs.push(id);
-            *slot = Some(Signal::Node(id));
+            *slot = Some(BoolWire::Node(id));
         }
 
         let mut parsed_gates = 0usize;
@@ -350,12 +329,12 @@ impl BitCircuit {
                 _ => {
                     let table = bristol_truth_table(&operation, inputs.len())?;
                     let id = circuit.nodes.len();
-                    circuit.nodes.push(BitNode::Lut {
+                    circuit.nodes.push(BoolNode::Lut {
                         name: format!("w_{output_wire}"),
                         inputs,
                         table,
                     });
-                    Signal::Node(id)
+                    BoolWire::Node(id)
                 }
             };
             if wires[output_wire].replace(value).is_some() {
@@ -379,7 +358,7 @@ impl BitCircuit {
     pub fn validate_topological(&self) -> Result<(), String> {
         for (id, node) in self.nodes.iter().enumerate() {
             for signal in node.inputs() {
-                if let Signal::Node(input) = signal
+                if let BoolWire::Node(input) = signal
                     && *input >= id
                 {
                     return Err(format!(
@@ -396,7 +375,7 @@ impl BitCircuit {
         self.nodes
             .iter()
             .enumerate()
-            .filter_map(|(id, node)| matches!(node, BitNode::Lut { .. }).then_some(id))
+            .filter_map(|(id, node)| matches!(node, BoolNode::Lut { .. }).then_some(id))
     }
 
     pub fn topological_gates(&self) -> Vec<usize> {
@@ -410,12 +389,12 @@ impl BitCircuit {
         let mut indegree = vec![0usize; self.nodes.len()];
         let mut successors = vec![Vec::new(); self.nodes.len()];
         for (id, node) in self.nodes.iter().enumerate() {
-            if !matches!(node, BitNode::Lut { .. }) {
+            if !matches!(node, BoolNode::Lut { .. }) {
                 continue;
             }
             for input in node.inputs() {
-                if let Signal::Node(input_id) = input
-                    && matches!(self.nodes[*input_id], BitNode::Lut { .. })
+                if let BoolWire::Node(input_id) = input
+                    && matches!(self.nodes[*input_id], BoolNode::Lut { .. })
                 {
                     indegree[id] += 1;
                     successors[*input_id].push(id);
@@ -449,10 +428,10 @@ impl BitCircuit {
         let mut values = vec![false; self.nodes.len()];
         for (id, node) in self.nodes.iter().enumerate() {
             values[id] = match node {
-                BitNode::Input { name } => *inputs
+                BoolNode::Input { name } => *inputs
                     .get(name)
                     .ok_or_else(|| format!("missing input '{name}'"))?,
-                BitNode::Lut { inputs, table, .. } => {
+                BoolNode::Lut { inputs, table, .. } => {
                     let mut index = 0usize;
                     for signal in inputs {
                         index = (index << 1) | usize::from(signal_value(*signal, &values));
@@ -479,7 +458,7 @@ impl BitCircuit {
         for assignment in 0..(1usize << self.inputs.len()) {
             let mut values = HashMap::new();
             for (position, id) in self.inputs.iter().enumerate() {
-                let BitNode::Input { name } = &self.nodes[*id] else {
+                let BoolNode::Input { name } = &self.nodes[*id] else {
                     unreachable!()
                 };
                 let bit = (assignment >> (self.inputs.len() - position - 1)) & 1 != 0;
@@ -491,10 +470,10 @@ impl BitCircuit {
     }
 }
 
-fn signal_value(signal: Signal, values: &[bool]) -> bool {
+fn signal_value(signal: BoolWire, values: &[bool]) -> bool {
     match signal {
-        Signal::Const(value) => value,
-        Signal::Node(id) => values[id],
+        BoolWire::Const(value) => value,
+        BoolWire::Node(id) => values[id],
     }
 }
 
@@ -557,11 +536,11 @@ fn parse_bench_invocation(expression: &str) -> Result<(String, Vec<&str>), Strin
 }
 
 fn lower_bench_gate(
-    circuit: &mut BitCircuit,
+    circuit: &mut BoolCircuit,
     output: &str,
     operation: &str,
-    inputs: &[Signal],
-) -> Result<Signal, String> {
+    inputs: &[BoolWire],
+) -> Result<BoolWire, String> {
     match operation {
         "BUFF" | "BUF" => {
             if inputs.len() != 1 {
@@ -619,18 +598,18 @@ fn lower_bench_gate(
 }
 
 fn push_bench_lut(
-    circuit: &mut BitCircuit,
+    circuit: &mut BoolCircuit,
     name: String,
-    inputs: Vec<Signal>,
+    inputs: Vec<BoolWire>,
     table: Vec<u8>,
-) -> Signal {
+) -> BoolWire {
     let id = circuit.nodes.len();
-    circuit.nodes.push(BitNode::Lut {
+    circuit.nodes.push(BoolNode::Lut {
         name,
         inputs,
         table,
     });
-    Signal::Node(id)
+    BoolWire::Node(id)
 }
 
 fn bench_binary_truth_table(operation: &str) -> Option<Vec<u8>> {
@@ -761,7 +740,7 @@ mod tests {
             1
             .end
         "#;
-        let circuit = BitCircuit::parse_blif(source).unwrap();
+        let circuit = BoolCircuit::parse_blif(source).unwrap();
         assert_eq!(circuit.nodes.len(), 4);
         let assignments = circuit.exhaustive_inputs().unwrap();
         let outputs: Vec<_> = assignments
@@ -789,8 +768,8 @@ mod tests {
     #[test]
     fn parses_line_continuations() {
         let source = ".inputs a \\\nb\n.outputs z\n.names a b z\n1- 1\n-1 1\n.end\n";
-        let circuit = BitCircuit::parse_blif(source).unwrap();
-        let BitNode::Lut { table, .. } = &circuit.nodes[2] else {
+        let circuit = BoolCircuit::parse_blif(source).unwrap();
+        let BoolNode::Lut { table, .. } = &circuit.nodes[2] else {
             panic!()
         };
         assert_eq!(table, &[0, 1, 1, 1]);
@@ -814,7 +793,7 @@ mod tests {
             22 = NAND(10, 16)
             23 = NAND(16, 19)
         "#;
-        let circuit = BitCircuit::parse_bench(source).unwrap();
+        let circuit = BoolCircuit::parse_bench(source).unwrap();
         assert_eq!(circuit.inputs.len(), 5);
         assert_eq!(circuit.outputs.len(), 2);
         assert_eq!(circuit.nodes.len(), 11);
@@ -856,7 +835,7 @@ mod tests {
             inverted = NOT(a)
             buffered = BUFF(inverted)
         "#;
-        let circuit = BitCircuit::parse_bench(source).unwrap();
+        let circuit = BoolCircuit::parse_bench(source).unwrap();
         assert!(circuit.nodes.iter().all(|node| node.inputs().len() <= 2));
 
         for inputs in circuit.exhaustive_inputs().unwrap() {
@@ -880,7 +859,7 @@ mod tests {
     #[test]
     fn parses_bench_constants() {
         let source = "OUTPUT(zero)\nOUTPUT(one)\nzero = BUFF(FALSE)\none = BUF(TRUE)\n";
-        let circuit = BitCircuit::parse_bench(source).unwrap();
+        let circuit = BoolCircuit::parse_bench(source).unwrap();
         assert_eq!(
             circuit.evaluate(&HashMap::new()).unwrap(),
             vec![("zero".to_owned(), false), ("one".to_owned(), true)]
@@ -898,7 +877,7 @@ mod tests {
             2 1 1 3 4 AND
             1 1 4 6 INV
         "#;
-        let circuit = BitCircuit::parse_bristol(source).unwrap();
+        let circuit = BoolCircuit::parse_bristol(source).unwrap();
         assert_eq!(circuit.inputs.len(), 3);
         assert_eq!(circuit.outputs.len(), 1);
         for inputs in circuit.exhaustive_inputs().unwrap() {

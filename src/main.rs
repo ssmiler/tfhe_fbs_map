@@ -1,10 +1,16 @@
+pub mod circuit;
+pub mod lut;
+pub mod mapper;
+
+use circuit::{BoolCircuit, BoolNode};
+use lut::LutCircuit;
+use mapper::{CoefficientPolicy, MapConfig, Mapper, SchedulePolicy};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
-use tfhe_fbs_map::{BitCircuit, BitNode, CoefficientPolicy, MapConfig, Mapper, SchedulePolicy};
 
 #[derive(Debug)]
 struct Arguments {
@@ -35,7 +41,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let arguments = parse_arguments()?;
-    let bit_circuit = BitCircuit::parse_file(&arguments.filename, &arguments.input_type)?;
+    let bit_circuit = parse_file(&arguments.filename, &arguments.input_type)?;
     let max_fbs_size = if arguments.strict_fbs_size {
         arguments.fbs_size
     } else {
@@ -70,12 +76,9 @@ fn run() -> Result<(), String> {
         let start = Instant::now();
         let mapped = mapper.map(&bit_circuit)?;
         total_duration += start.elapsed().as_secs_f64();
-        if best
-            .as_ref()
-            .is_none_or(|current: &tfhe_fbs_map::LutCircuit| {
-                mapped.stats().quality_key() < current.stats().quality_key()
-            })
-        {
+        if best.as_ref().is_none_or(|current: &LutCircuit| {
+            mapped.stats().quality_key() < current.stats().quality_key()
+        }) {
             best = Some(mapped);
         }
     }
@@ -123,6 +126,27 @@ fn run() -> Result<(), String> {
         total_duration,
     );
     Ok(())
+}
+
+fn parse_file(path: impl AsRef<Path>, input_type: &str) -> Result<BoolCircuit, String> {
+    let path = path.as_ref();
+    let source =
+        fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let input_type = if input_type == "auto" {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some(extension) if extension.eq_ignore_ascii_case("bench") => "bench",
+            _ => "blif",
+        }
+    } else {
+        input_type
+    };
+    let circuit = match input_type {
+        "blif" => BoolCircuit::parse_blif(&source),
+        "bench" => BoolCircuit::parse_bench(&source),
+        "bristol" => BoolCircuit::parse_bristol(&source),
+        value => Err(format!("unknown input type '{value}'")),
+    };
+    circuit.map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn trial_schedule(trial: usize, seed: u64) -> SchedulePolicy {
@@ -256,8 +280,8 @@ Options:
 }
 
 fn verify(
-    bit_circuit: &BitCircuit,
-    lut_circuit: &tfhe_fbs_map::LutCircuit,
+    bit_circuit: &BoolCircuit,
+    lut_circuit: &LutCircuit,
     samples: usize,
     seed: u64,
 ) -> Result<(), String> {
@@ -272,7 +296,7 @@ fn verify(
     for _ in 0..samples {
         let mut inputs = HashMap::with_capacity(bit_circuit.inputs.len());
         for id in &bit_circuit.inputs {
-            let BitNode::Input { name } = &bit_circuit.nodes[*id] else {
+            let BoolNode::Input { name } = &bit_circuit.nodes[*id] else {
                 unreachable!()
             };
             state = xorshift64(state);
@@ -284,8 +308,8 @@ fn verify(
 }
 
 fn compare_once(
-    bit_circuit: &BitCircuit,
-    lut_circuit: &tfhe_fbs_map::LutCircuit,
+    bit_circuit: &BoolCircuit,
+    lut_circuit: &LutCircuit,
     inputs: &HashMap<String, bool>,
 ) -> Result<(), String> {
     let expected = bit_circuit.evaluate(inputs)?;
