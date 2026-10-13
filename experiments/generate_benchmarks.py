@@ -1,6 +1,131 @@
 import argparse
-import context
-from fbs_mapper.bit_exec_env import *
+
+
+class Node:
+    def __init__(self, name):
+        self.name = name
+
+
+class Const(Node):
+    def __init__(self, value):
+        super().__init__(str(value))
+        self.value = value
+
+
+class Input(Node):
+    pass
+
+
+class Gate(Node):
+    def __init__(self, name, inputs, truth_table):
+        super().__init__(name)
+        self.inputs = inputs
+        self.truth_table = truth_table
+
+
+class BitExecEnv:
+    CONST0 = Const(0)
+    CONST1 = Const(1)
+
+    def __init__(self):
+        self._unique_id = 0
+        self.instructions = []
+        self.inputs = []
+        self.outputs = {}
+        self.ids = set()
+
+    def _new_id(self):
+        self._unique_id += 1
+        return f"n{self._unique_id}"
+
+    def _get_id(self):
+        name = self._new_id()
+        while name in self.ids:
+            name = self._new_id()
+        self.ids.add(name)
+        return name
+
+    def input(self, name):
+        node = Input(name)
+        self.instructions.append(node)
+        self.inputs.append(node)
+        return node
+
+    def output(self, name, node):
+        self.outputs[name] = node
+
+    def _gate(self, inputs, truth_table):
+        node = Gate(self._get_id(), inputs, truth_table)
+        self.instructions.append(node)
+        return node
+
+    def op_not(self, inp):
+        if inp is self.CONST0:
+            return self.CONST1
+        if inp is self.CONST1:
+            return self.CONST0
+        return self._gate([inp], [1, 0])
+
+    def op_and(self, left, right):
+        if left is self.CONST0 or right is self.CONST0:
+            return self.CONST0
+        if left is self.CONST1:
+            return right
+        if right is self.CONST1:
+            return left
+        return self._gate([left, right], [0, 0, 0, 1])
+
+    def op_xor(self, left, right):
+        if left is self.CONST0:
+            return right
+        if right is self.CONST0:
+            return left
+        if left is self.CONST1:
+            return self.op_not(right)
+        if right is self.CONST1:
+            return self.op_not(left)
+        return self._gate([left, right], [0, 1, 1, 0])
+
+    def op_or(self, left, right):
+        if left is self.CONST0:
+            return right
+        if right is self.CONST0:
+            return left
+        if left is self.CONST1 or right is self.CONST1:
+            return self.CONST1
+        return self._gate([left, right], [0, 1, 1, 1])
+
+    def remove_dangling_nodes(self):
+        visited = {output.name for output in self.outputs.values()}
+        for instruction in reversed(self.instructions):
+            if instruction.name in visited and isinstance(instruction, Gate):
+                visited.update(inp.name for inp in instruction.inputs)
+        self.instructions = [
+            instruction
+            for instruction in self.instructions
+            if instruction.name in visited
+        ]
+
+    def to_blif(self, fs, model_name):
+        print(f".model {model_name}", file=fs)
+        print(f".inputs {' '.join(inp.name for inp in self.inputs)}", file=fs)
+        print(f".outputs {' '.join(self.outputs)}", file=fs)
+
+        for instruction in self.instructions:
+            if not isinstance(instruction, Gate):
+                continue
+            inputs = " ".join(inp.name for inp in instruction.inputs)
+            print(f".names {inputs} {instruction.name}", file=fs)
+            output_value = int(sum(instruction.truth_table) * 2 <= len(instruction.truth_table))
+            width = (len(instruction.truth_table) - 1).bit_length()
+            for index, value in enumerate(instruction.truth_table):
+                if value == output_value:
+                    print(f"{index:0{width}b} {output_value}", file=fs)
+
+        for name, output in self.outputs.items():
+            if output.name != name:
+                print(f".names {output.name} {name}\n1 1", file=fs)
+        print(".end", file=fs)
 
 
 class Bit:
@@ -76,11 +201,11 @@ def ascon_lut():
     x0 = x0 ^ x4
     x2 = ~x2
 
-    x0.output("x0")
-    x1.output("x1")
-    x2.output("x2")
-    x3.output("x3")
-    x4.output("x4")
+    x0.output("y0")
+    x1.output("y1")
+    x2.output("y2")
+    x3.output("y3")
+    x4.output("y4")
 ascon_lut.__name__ = "ascon_lut"
 
 
@@ -395,7 +520,6 @@ class TriviumStream:
         r = []
         for i in range(iters):
             r, t1, t2, t3 = iter_fnc(s)
-            r.output(f"r{i}")
 
             s[1:94] = [t3, *s[1:93]]
             s[94:178] = [t1, *s[94:177]]
@@ -491,5 +615,5 @@ if __name__ == '__main__':
 
         bit_env.remove_dangling_nodes()
         out_filename = f"{args.prefix}/{bench}.blif"
-        fs = open(out_filename, "w")
-        bit_env.to_blif(fs=fs, model_name=bench)
+        with open(out_filename, "w") as fs:
+            bit_env.to_blif(fs=fs, model_name=bench)

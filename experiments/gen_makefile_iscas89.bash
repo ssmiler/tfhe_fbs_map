@@ -1,10 +1,7 @@
 #! /bin/bash
 
-# clone and compile abc
-[ -f abc/abc ] || ( bash install_abc.sh  ) || exit
-
 # wget benchmarks
-[ -d benchmarks/iscas89/ ] || ( echo "Wget benchmarks" && wget -nd -r -l1 -A "*.bench" https://pld.ttu.ee/~maksim/benchmarks/iscas89/bench -P benchmarks/iscas89/ ) || exit
+[ -d benchmarks/iscas89 ] || ( echo "Wget benchmarks" && wget -nd -r -l1 -A "*.bench" https://pld.ttu.ee/~maksim/benchmarks/iscas89/bench -P benchmarks/iscas89 ) || exit
 
 BENCHES=""
 # BENCHES+=" benchmarks/iscas89/c1196.bench"
@@ -51,9 +48,9 @@ BENCHES+=" benchmarks/iscas89/s953.bench"
 
 FBS_SIZES=$(seq 2 32)
 
-MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
+FBS_MAP="../target/release/fbs-map"
 
-BENCH_XAG_DIR=outputs/benchmarks_xag/iscas89
+BENCH_UNROLLED_DIR=outputs/iscas89_unrolled
 OUTPUT_DIR=outputs/iscas89
 
 rm -f Makefile
@@ -66,30 +63,24 @@ echo -e "\t@echo" >> Makefile
 echo -e "\t@echo" >> Makefile
 echo >> Makefile
 
-# targets for mapping bench circuits to XAGs
-echo "$BENCH_XAG_DIR:" >> Makefile
-echo -e "\t@mkdir -p $BENCH_XAG_DIR" >> Makefile
+# targets for unrolling sequential benchmarks into combinational BENCH files
+echo "$BENCH_UNROLLED_DIR:" >> Makefile
+echo -e "\t@mkdir -p $BENCH_UNROLLED_DIR" >> Makefile
 echo >> Makefile
-ALL+=" $BENCH_XAG_DIR"
+ALL+=" $BENCH_UNROLLED_DIR"
 
-BLIFS=""
+UNROLLED_BENCHES=""
 for BENCH in $BENCHES
 do
     BENCH_BASE=$(basename -- "$BENCH" .bench)
-    BLIF="$BENCH_XAG_DIR/$BENCH_BASE.blif"
-    BLIF_XAG="$BENCH_XAG_DIR/${BENCH_BASE}-xag.blif"
+    UNROLLED="$BENCH_UNROLLED_DIR/$BENCH_BASE.bench"
 
-    echo "$BLIF: $BENCH | $BENCH_XAG_DIR" >> Makefile
-    echo -e "\t./abc/abc -c \"read_bench $BENCH; frames -F 10 -i; write_blif $BLIF\"" >> Makefile
+    echo "$UNROLLED: $BENCH unroll_bench.py | $BENCH_UNROLLED_DIR" >> Makefile
+    echo -e "\tpython3 unroll_bench.py $BENCH $UNROLLED --frames 10" >> Makefile
     echo >> Makefile
-    BLIFS+=" $BLIF"
-
-    # echo "$BLIF_XAG: $BENCH | $BENCH_XAG_DIR" >> Makefile
-    # echo -e "\t./abc/abc -c \"read_bench $BENCH; frames -F 10 -i; read_library lib.genlib; ps; map; ps; unmap; ps; write_blif $BLIF_XAG\"" >> Makefile
-    # echo >> Makefile
-    # BLIFS+=" $BLIF_XAG"
+    UNROLLED_BENCHES+=" $UNROLLED"
 done
-ALL+=" $BLIFS"
+ALL+=" $UNROLLED_BENCHES"
 
 # targets for mapping bench circuits to FBSs
 echo "$OUTPUT_DIR:" >> Makefile
@@ -98,35 +89,35 @@ echo >> Makefile
 ALL+=" $OUTPUT_DIR"
 
 function run_bench() {
-    BLIF=$1
-    BENCH=$2
-    FBS_SIZE=$3
-    MAPPER=$4
+    local CIRCUIT=$1
+    local BENCH_NAME=$2
+    local FBS_SIZE=$3
+    local MAPPER=$4
 
-    OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
-    OUT_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.lbf"
-    LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
+    OUT="$OUTPUT_DIR/$BENCH_NAME"_"$FBS_SIZE"_"$MAPPER.fbs"
+    OUT_LBF="$OUTPUT_DIR/$BENCH_NAME"_"$FBS_SIZE"_"$MAPPER.lbf"
+    LOG="$OUTPUT_DIR/$BENCH_NAME"_"$FBS_SIZE"_"$MAPPER.log"
     ALL+=" ${OUT_LBF}"
 
-    echo "$OUT $OUT_LBF $LOG: $BLIF | $OUTPUT_DIR"
-    echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --output_lbf ${OUT_LBF} > $LOG 2>&1"
+    echo "$OUT $OUT_LBF $LOG: $CIRCUIT | $OUTPUT_DIR"
+    echo -e "\t$FBS_MAP $CIRCUIT --fbs-size $FBS_SIZE --mapper $MAPPER --output $OUT --output-lbf ${OUT_LBF} > $LOG 2>&1"
     echo ""
 }
 
-for BLIF in $BLIFS
+for CIRCUIT in $UNROLLED_BENCHES
 do
-    BENCH=$(basename -- "$BLIF" .blif)
+    BENCH=$(basename -- "$CIRCUIT" .bench)
 
     for MAPPER in "basic"
     do
-        run_bench $BLIF $BENCH 2 $MAPPER >> Makefile
+        run_bench $CIRCUIT $BENCH 2 $MAPPER >> Makefile
     done
 
     for FBS_SIZE in $FBS_SIZES
     do
         for MAPPER in "search"
         do
-            run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
+            run_bench $CIRCUIT $BENCH $FBS_SIZE $MAPPER >> Makefile
         done
     done
 

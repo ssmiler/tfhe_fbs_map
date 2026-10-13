@@ -1,6 +1,7 @@
 import pandas as pd
 import argparse
 import subprocess
+from pathlib import Path
 
 
 get_boot_cost_dict = dict()
@@ -20,8 +21,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Append execution estimates to aggregated logs csv file")
     parser.add_argument("inp", nargs="+", help="input csv")
-    parser.add_argument("--opt", default="./concrete/compilers/concrete-optimizer/optimizer",
-                        help="path to patched concrete v0-optimizer")
+    parser.add_argument(
+        "--opt",
+        default=str(
+            Path(__file__).resolve().parent
+            / "concrete/compilers/concrete-optimizer/target/release/v0-parameters"
+        ),
+        help="path to the compiled patched Concrete v0-parameters binary",
+    )
 
     args = parser.parse_args()
 

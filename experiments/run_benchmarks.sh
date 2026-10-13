@@ -2,6 +2,8 @@ NB_J=4
 
 OUT_DIR=outputs
 
+cargo build --release --manifest-path ../Cargo.toml || exit
+
 mkdir -p ${OUT_DIR}
 rm -f ${OUT_DIR}/*.log
 

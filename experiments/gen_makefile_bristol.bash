@@ -32,7 +32,7 @@ BENCHES+=" benchmarks/bristol/AES-non-expanded.txt"
 
 FBS_SIZES=$(seq 2 16)
 
-MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
+FBS_MAP="../target/release/fbs-map"
 
 OUTPUT_DIR=outputs/bristol
 
@@ -53,18 +53,18 @@ echo >> Makefile
 ALL+=" $OUTPUT_DIR"
 
 function run_bench() {
-    BLIF=$1
-    BENCH=$2
-    FBS_SIZE=$3
-    MAPPER=$4
+    local CIRCUIT=$1
+    local BENCH_NAME=$2
+    local FBS_SIZE=$3
+    local MAPPER=$4
 
-    OUT="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.fbs"
-    OUT_LBF="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.lbf"
-    LOG="$OUTPUT_DIR/$BENCH"_"$FBS_SIZE"_"$MAPPER.log"
+    OUT="$OUTPUT_DIR/$BENCH_NAME"_"$FBS_SIZE"_"$MAPPER.fbs"
+    OUT_LBF="$OUTPUT_DIR/$BENCH_NAME"_"$FBS_SIZE"_"$MAPPER.lbf"
+    LOG="$OUTPUT_DIR/$BENCH_NAME"_"$FBS_SIZE"_"$MAPPER.log"
     ALL+=" ${OUT_LBF}"
 
-    echo "$OUT $OUT_LBF $LOG: $BLIF | $OUTPUT_DIR"
-    echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --type bristol --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --output_lbf ${OUT_LBF} > $LOG 2>&1"
+    echo "$OUT $OUT_LBF $LOG: $CIRCUIT | $OUTPUT_DIR"
+    echo -e "\t$FBS_MAP $CIRCUIT --type bristol --fbs-size $FBS_SIZE --mapper $MAPPER --output $OUT --output-lbf ${OUT_LBF} > $LOG 2>&1"
     echo ""
 }
 
@@ -81,7 +81,7 @@ do
     do
         for MAPPER in "search"
         do
-            run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
+            run_bench $BENCH $BASE $FBS_SIZE $MAPPER >> Makefile
         done
     done
 
