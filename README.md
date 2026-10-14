@@ -114,12 +114,16 @@ outputs/epfl/adder_15_search.fbs outputs/epfl/adder_15_search.lbf outputs/epfl/a
 
 ### Analyse results
 
-The following script will interpret the mapping results obtained after the benchmarks execution and generate tables (latex code) and figures used in the paper.
+The following script will interpret the mapping results obtained after the benchmarks execution and generate tables and figures used in the paper.
 
 ```bash
 cd outputs
 python3 ../analyse_results.py
+# or generate Markdown tables ready for README.md
+python3 ../analyse_results.py --table-format markdown
+# or print aligned plain-text tables
+python3 ../analyse_results.py --table-format console
 ```
 
 > [!NOTE]
-> The script `analyse_results.py` only outputs raw latex code (e.g. only latex table content is generated without table floats instructions)
+> The default table format is raw LaTeX code without table float instructions. Use `--table-format markdown` for Markdown tables or `--table-format console` for aligned plain text.

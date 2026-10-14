@@ -1,8 +1,87 @@
+import argparse
 import pandas as pd
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import itertools as it
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--table-format",
+    choices=("latex", "markdown", "console"),
+    default="latex",
+    help="format used for tables written to stdout (default: latex)",
+)
+args = parser.parse_args()
+
+
+def print_table(df, index=True):
+    if args.table_format == "latex":
+        print(df.to_latex(index=index))
+        return
+
+    def cell(value):
+        if pd.isna(value) or str(value) in ("nan", "NaN"):
+            return ""
+        value = str(value).replace("\\#", "#").replace("\n", " ")
+        return value.replace("|", "\\|") if args.table_format == "markdown" else value
+
+    columns = df.columns
+    if isinstance(columns, pd.MultiIndex):
+        columns = [" ".join(str(part) for part in column if part) for column in columns]
+    else:
+        columns = [str(column) for column in columns]
+    columns = list(map(cell, columns))
+
+    if args.table_format == "console":
+        table = df.copy()
+        table.columns = columns
+        table = table.map(cell)
+        if index:
+            table.insert(0, cell(df.index.name or "bench"), list(map(cell, df.index)))
+        print(table.to_string(index=False))
+        print()
+        return
+
+    headers = ([df.index.name or "bench"] if index else []) + columns
+    rows = df.itertuples(index=index, name=None)
+
+    print("| " + " | ".join(map(cell, headers)) + " |")
+    print("| " + " | ".join("---" for _ in headers) + " |")
+    for row in rows:
+        print("| " + " | ".join(map(cell, row)) + " |")
+    print()
+
+
+def format_benchmark_index(index):
+    if args.table_format == "latex":
+        return "\\textsf{" + index.str.replace("_", "\\_") + "}"
+    return index
+
+
+def format_speedup_table(df):
+    formatted = df.astype(str)
+    formatted.iloc[:, [0, 2]] = ""
+    for row in range(formatted.shape[0]):
+        comparable = not np.isnan(df.iloc[row, 2])
+        best = max(df.iloc[row, [0, 2]]) if comparable else None
+        for column in [0, 2]:
+            value = df.iloc[row, column]
+            if np.isnan(value):
+                text = "-"
+            elif args.table_format == "latex":
+                text = f"{value:.2f}\\times"
+            else:
+                text = f"{value:.2f}×"
+            if comparable and value == best:
+                if args.table_format == "latex":
+                    text = f"\\mathbf{{{text}}}"
+                elif args.table_format == "markdown":
+                    text = f"**{text}**"
+                else:
+                    text = f"{text} (best)"
+            formatted.iloc[row, column] = f"${text}$" if args.table_format == "latex" else text
+    return formatted
 
 def add_best_cols(df):
     df["nb_bootstrap_best"] = df.groupby(
@@ -124,24 +203,25 @@ df = pd.concat((df, e))
 
 df1 = f2b(df)
 df1 = df1.loc[bench_arith + bench_ctrl]
-df1.index = df1.index.str.replace("_", "\\_")
-df1.index = "\\textsf{" + df1.index + "}"
+df1.index = format_benchmark_index(df1.index)
 df1.loc["avg."] = df1.mean(numeric_only = True)
 
 df2 = df1.astype(str)
 df2.iloc[:, [0,1,3,4]] = ""
 
 idx = df1.iloc[:, 0] > -0.5
-df2.iloc[:, [0, 1]] = df1.iloc[:, [0, 1]].map(lambda e: f"${e:2.0f}\\%$")
+suffix = "\\%$" if args.table_format == "latex" else "%"
+prefix = "$" if args.table_format == "latex" else ""
+df2.iloc[:, [0, 1]] = df1.iloc[:, [0, 1]].map(lambda e: f"{prefix}{e:2.0f}{suffix}")
 df2.iloc[idx, [0, 1, 2]] = ""
 
 idx = df1.iloc[:, 3] > -0.5
-df2.iloc[:, [3, 4]] = df1.iloc[:, [3, 4]].map(lambda e: f"${e:2.0f}\\%$")
+df2.iloc[:, [3, 4]] = df1.iloc[:, [3, 4]].map(lambda e: f"{prefix}{e:2.0f}{suffix}")
 df2.iloc[idx, [3, 4, 5]] = ""
 
 df2.iloc[-1, [2,5]] = ""
 
-print(df2.to_latex())
+print_table(df2)
 
 
 
@@ -189,25 +269,12 @@ ruler = ["c499", "c880", "c1908", "c2670", "c5315", "c6288"]
 df = pd.read_csv("iscas85_agg_est.csv")
 df = add_best_cols(df)
 df1 = f4(df)
-df1.index = df1.index.str.slice(stop = -4)
 df1.sort_index(key = lambda e: e.str.slice(start=1).astype(int), inplace=True)
 df1 = df1.join(t_autohog, on = "bench")
-df1.index = "\\textsf{" + df1.index + "}"
+df1.index = format_benchmark_index(df1.index)
 df1.loc["avg."] = df1.mean(numeric_only = True)
 
-df2 = df1.astype(str)
-df2.iloc[:, [0,2]] = ""
-
-s = df1.loc[:, df1.columns.get_level_values(1)=='speedup'].map(lambda e: "-" if np.isnan(e) else f"{e:.2f}\\times")
-df2.loc[:, df2.columns.get_level_values(1)=='speedup'] = s
-for i in range(df2.shape[0]):
-    m = 10000 if df2.iloc[i, 2] == "-" else df2.iloc[i, [0, 2]].max()
-    for j in [0, 2]:
-        if df2.iloc[i, j] == m:
-            df2.iloc[i, j] = f"\\mathbf{{{df2.iloc[i, j]}}}"
-        df2.iloc[i, j] = f"${df2.iloc[i, j]}$"
-
-print(df2.to_latex())
+print_table(format_speedup_table(df1))
 
 
 # iscas89
@@ -249,22 +316,10 @@ df = add_best_cols(df)
 df1 = f4(df)
 df1.sort_index(key = lambda e: e.str.slice(start=1).astype(int), inplace=True)
 df1 = df1.join(t_autohog, on = "bench")
-df1.index = "\\textsf{" + df1.index + "}"
+df1.index = format_benchmark_index(df1.index)
 df1.loc["avg."] = df1.mean(numeric_only = True)
 
-df2 = df1.astype(str)
-df2.iloc[:, [0,2]] = ""
-
-s = df1.loc[:, df1.columns.get_level_values(1)=='speedup'].map(lambda e: "-" if np.isnan(e) else f"{e:.2f}\\times")
-df2.loc[:, df2.columns.get_level_values(1)=='speedup'] = s
-for i in range(df2.shape[0]):
-    m = 10000 if df2.iloc[i, 2] == "-" else df2.iloc[i, [0, 2]].max()
-    for j in [0, 2]:
-        if df2.iloc[i, j] == m:
-            df2.iloc[i, j] = f"\\mathbf{{{df2.iloc[i, j]}}}"
-        df2.iloc[i, j] = f"${df2.iloc[i, j]}$"
-
-print(df2.to_latex())
+print_table(format_speedup_table(df1))
 
 
 
@@ -383,7 +438,21 @@ our_simon_max_lut_size = d.loc[best_simon_idx].max_lut_size
 our_simon_total_cost = d.loc[best_simon_idx].total_cost
 
 
-print(f"SIMON & {bon_simon_nb_fbs} & {bon_simon_fbs_size} & {our_simon_nb_fbs} & {our_simon_fbs_size} ({our_simon_max_lut_size}) & ${bon_simon_total_cost/our_simon_total_cost:.2f}\\times$ \\\\")
-print(f"ASCON & {bon_ascon_nb_fbs} & {bon_ascon_fbs_size} & {our_ascon_nb_fbs} & {our_ascon_fbs_size} ({our_ascon_max_lut_size}) & ${bon_ascon_total_cost/our_ascon_total_cost:.2f}\\times$ \\\\")
-print(f"AES s-box & {bon_aes_nb_fbs} & {bon_aes_fbs_size} & {our_aes_nb_fbs} & {our_aes_fbs_size} ({our_aes_max_lut_size}) & ${bon_aes_total_cost/our_aes_total_cost:.2f}\\times$ \\\\")
+comparison = [
+    ("SIMON", bon_simon_nb_fbs, bon_simon_fbs_size, our_simon_nb_fbs, our_simon_fbs_size, our_simon_max_lut_size, bon_simon_total_cost / our_simon_total_cost),
+    ("ASCON", bon_ascon_nb_fbs, bon_ascon_fbs_size, our_ascon_nb_fbs, our_ascon_fbs_size, our_ascon_max_lut_size, bon_ascon_total_cost / our_ascon_total_cost),
+    ("AES s-box", bon_aes_nb_fbs, bon_aes_fbs_size, our_aes_nb_fbs, our_aes_fbs_size, our_aes_max_lut_size, bon_aes_total_cost / our_aes_total_cost),
+]
+if args.table_format == "latex":
+    for name, bon_count, bon_size, our_count, our_size, our_max_size, speedup in comparison:
+        print(f"{name} & {bon_count} & {bon_size} & {our_count} & {our_size} ({our_max_size}) & ${speedup:.2f}\\times$ \\\\")
+else:
+    comparison = pd.DataFrame(
+        [
+            (name, int(bon_count), int(bon_size), int(our_count), f"{int(our_size)} ({int(our_max_size)})", f"{speedup:.2f}×")
+            for name, bon_count, bon_size, our_count, our_size, our_max_size, speedup in comparison
+        ],
+        columns=["Circuit", "Bon et al. #FBS", "Bon et al. FBS size", "Our #FBS", "Our FBS size", "Speedup"],
+    )
+    print_table(comparison, index=False)
 
