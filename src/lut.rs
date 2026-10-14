@@ -108,23 +108,32 @@ impl LutCircuit {
     }
 
     pub fn linear(&mut self, terms: &[(i64, LutSignal)], mut constant: i64) -> LutSignal {
-        let (mut flattened, flattened_constant) = self.flatten_linear(terms, constant);
-        constant = flattened_constant;
-        flattened.retain(|_, coefficient| *coefficient != 0);
-        if flattened.is_empty() {
-            return LutSignal::Const(constant);
-        }
-        if flattened.len() == 1 && constant == 0 {
-            let (&id, &coefficient) = flattened.first_key_value().unwrap();
-            if coefficient == 1 {
-                return LutSignal::Node(id);
+        let terms = if self.multioutput_fbs {
+            let (mut flattened, flattened_constant) = self.flatten_linear(terms, constant);
+            constant = flattened_constant;
+            flattened.retain(|_, coefficient| *coefficient != 0);
+            if flattened.is_empty() {
+                return LutSignal::Const(constant);
             }
-        }
+            if flattened.len() == 1 && constant == 0 {
+                let (&id, &coefficient) = flattened.first_key_value().unwrap();
+                if coefficient == 1 {
+                    return LutSignal::Node(id);
+                }
+            }
 
-        let terms: Vec<_> = flattened
-            .into_iter()
-            .map(|(id, coefficient)| (coefficient, id))
-            .collect();
+            flattened
+                .into_iter()
+                .map(|(id, coefficient)| (coefficient, id))
+                .collect()
+        } else {
+            let (flattened, flattened_constant) = self.flatten_linear_ordered(terms, constant);
+            constant = flattened_constant;
+            if flattened.is_empty() {
+                return LutSignal::Const(constant);
+            }
+            flattened
+        };
         let mut minimum = constant;
         let mut maximum = constant;
         let mut norm2 = 0u128;
@@ -174,6 +183,34 @@ impl LutCircuit {
                         }
                     }
                     _ => *flattened.entry(*id).or_default() += coefficient,
+                },
+            }
+        }
+        (flattened, constant)
+    }
+
+    fn flatten_linear_ordered(
+        &self,
+        terms: &[(i64, LutSignal)],
+        mut constant: i64,
+    ) -> (Vec<(i64, usize)>, i64) {
+        let mut flattened = Vec::new();
+        for &(coefficient, signal) in terms {
+            match signal {
+                LutSignal::Const(value) => constant += coefficient * value,
+                LutSignal::Node(id) => match &self.nodes[id] {
+                    LutNode::Linear {
+                        terms,
+                        constant: inner_constant,
+                    } => {
+                        constant += coefficient * inner_constant;
+                        flattened.extend(
+                            terms
+                                .iter()
+                                .map(|&(inner, input)| (coefficient * inner, input)),
+                        );
+                    }
+                    _ => flattened.push((coefficient, id)),
                 },
             }
         }
@@ -636,6 +673,7 @@ mod tests {
     #[test]
     fn flattens_and_canonicalizes_linear_nodes() {
         let mut circuit = LutCircuit::default();
+        circuit.set_multioutput_fbs(true);
         let a = circuit.input("a");
         let b = circuit.input("b");
         let x = circuit.linear(&[(2, a), (1, b)], 0);
@@ -648,6 +686,7 @@ mod tests {
     #[test]
     fn prepared_bootstrap_lookup_matches_linear_interning() {
         let mut circuit = LutCircuit::default();
+        circuit.set_multioutput_fbs(true);
         let a = circuit.input("a");
         let b = circuit.input("b");
         let x = circuit.linear(&[(2, a), (-1, b)], 3);

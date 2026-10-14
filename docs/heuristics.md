@@ -16,8 +16,18 @@ norm, with the larger cone first. If composition fails, that cone is bootstrappe
 and composition is retried. The second input is bootstrapped only if the retry
 also fails. Circuit outputs are bootstrapped eagerly in ordinary mode.
 
-Unreachable LUT entries are filled independently when needed to satisfy the
-negacyclic constraints. Uniform zero or one filling is retained when valid.
+Ordinary `search` uses Python's coefficient ranges and minimizes the original
+span bound, then the squared multivalue-table energy. Equal scores prefer
+descending coefficient pairs; coefficient norm is only used for configured
+limits. Cache keys retain the exact input tables and truth table so symmetry
+sharing cannot alter these tie choices.
+
+Ordinary linear operations preserve Python's term order and repeated terms when
+flattening. Canonical sorting and coefficient aggregation are retained in
+multi-output mode, where they enable physical bootstrap sharing.
+
+Unreachable LUT entries are filled uniformly with zero, then uniformly with
+one, as in Python. Mixed filling is not used to accept additional candidates.
 
 All three policies support the FBS size, negacyclic-extension, truth-table-size,
 and encoding-norm limits exposed by `fbs-map`. `--trials N` runs the selected

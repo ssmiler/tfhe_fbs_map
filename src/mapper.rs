@@ -295,31 +295,6 @@ struct CandidateCacheKey {
     second_basis: Vec<i64>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct CandidateCacheTransform {
-    canonical_to_original: [(usize, i64); 2],
-}
-
-impl CandidateCacheTransform {
-    fn to_canonical(self, original: (i64, i64)) -> (i64, i64) {
-        let original = [original.0, original.1];
-        let first = self.canonical_to_original[0];
-        let second = self.canonical_to_original[1];
-        (original[first.0] * first.1, original[second.0] * second.1)
-    }
-
-    fn to_original(self, canonical: (i64, i64)) -> (i64, i64) {
-        let canonical = [canonical.0, canonical.1];
-        let mut original = [0i64; 2];
-        for (position, (original_position, sign)) in
-            self.canonical_to_original.into_iter().enumerate()
-        {
-            original[original_position] = canonical[position] * sign;
-        }
-        (original[0], original[1])
-    }
-}
-
 type CandidateCache = HashMap<CandidateCacheKey, Option<(i64, i64)>>;
 
 pub struct Mapper {
@@ -701,16 +676,17 @@ impl Mapper {
             return self.search_candidate(environment, left, right, xy, truth_table, false);
         }
 
-        let (key, transform) = canonicalize_candidate_cache_key(truth_table, xy);
+        let key = CandidateCacheKey {
+            truth_table: truth_table.to_vec(),
+            first_basis: xy.iter().map(|pair| pair.0).collect(),
+            second_basis: xy.iter().map(|pair| pair.1).collect(),
+        };
         if let Some(scales) = cache.get(&key) {
-            return scales.and_then(|scales| {
-                self.make_candidate(left, right, xy, truth_table, transform.to_original(scales))
-            });
+            return scales
+                .and_then(|scales| self.make_candidate(left, right, xy, truth_table, scales));
         }
         let candidate = self.search_candidate(environment, left, right, xy, truth_table, true);
-        let cached_scales = candidate
-            .as_ref()
-            .map(|candidate| canonicalize_scale_pair(transform.to_canonical(candidate.scales)));
+        let cached_scales = candidate.as_ref().map(|candidate| candidate.scales);
         cache.insert(key, cached_scales);
         candidate
     }
@@ -722,7 +698,7 @@ impl Mapper {
         right: &Cone,
         xy: &[(i64, i64)],
         truth_table: &[u8],
-        canonical_sign: bool,
+        python_rules: bool,
     ) -> Option<Candidate> {
         let left_size = left.span() as i64;
         let right_size = right.span() as i64;
@@ -751,19 +727,26 @@ impl Mapper {
         };
         let independent_basis = workspace.independent_basis();
         let mut seen_coefficients = HashSet::new();
-        for a in 0..=right_size {
-            for b in -left_size..=left_size {
-                if !is_candidate_scale_pair(a, b, left_is_zero, right_is_zero, canonical_sign) {
+        let (a_minimum, b_minimum) = if python_rules && left_size >= right_size {
+            (-right_size, 0)
+        } else {
+            (0, -left_size)
+        };
+        for a in a_minimum..=right_size {
+            for b in b_minimum..=left_size {
+                if !python_rules
+                    && !is_candidate_scale_pair(a, b, left_is_zero, right_is_zero, false)
+                {
                     continue;
                 }
                 // Primitive scale pairs are already unique on independent bases.
-                if !independent_basis {
+                if !python_rules && !independent_basis {
                     let mut coefficient_key: Vec<_> = workspace
                         .coefficient_basis
                         .iter()
                         .map(|(left, right)| a * left + b * right)
                         .collect();
-                    normalize_coefficient_key(&mut coefficient_key, canonical_sign);
+                    normalize_coefficient_key(&mut coefficient_key, false);
                     if !seen_coefficients.insert(coefficient_key) {
                         continue;
                     }
@@ -787,7 +770,11 @@ impl Mapper {
                         .as_mut()
                         .is_some_and(|lookup| lookup.has_bootstrap(environment, (a, b), -minimum)),
                 );
-                let score = (reuse_cost, coefficient_bound, energy, merged_norm2, a, b);
+                let score = if python_rules {
+                    (reuse_cost, coefficient_bound, energy, 0, -a, -b)
+                } else {
+                    (reuse_cost, coefficient_bound, energy, merged_norm2, a, b)
+                };
                 if best
                     .as_ref()
                     .is_none_or(|(best_score, _)| score < *best_score)
@@ -989,19 +976,23 @@ impl Mapper {
             return true;
         }
 
-        // A completion is antipodal, or has a uniformly zero/one overlap.
-        let mut antipodal = true;
+        // Python tries uniform zero and uniform one filling, in that order.
+        let mut antipodal_zero = true;
+        let mut antipodal_one = true;
         let mut all_zero = true;
         let mut all_one = true;
         for (&left, &right) in known[..size - self.config.fbs_size]
             .iter()
             .zip(&known[self.config.fbs_size..])
         {
-            antipodal &= left == 2 || right == 2 || left != right;
+            antipodal_zero &=
+                (if left == 2 { 0 } else { left }) != (if right == 2 { 0 } else { right });
+            antipodal_one &=
+                (if left == 2 { 1 } else { left }) != (if right == 2 { 1 } else { right });
             all_zero &= left != 1 && right != 1;
             all_one &= left != 0 && right != 0;
         }
-        antipodal || all_zero || all_one
+        antipodal_zero || antipodal_one || all_zero || all_one
     }
 
     fn bootstrap_table(
@@ -1042,18 +1033,7 @@ impl Mapper {
             }
         }
 
-        // Unreachable entries can independently complete antipodal pairs.
-        let mut table: Vec<_> = known.iter().map(|value| value.unwrap_or(0)).collect();
-        for first in 0..size - self.config.fbs_size {
-            let second = first + self.config.fbs_size;
-            match (known[first], known[second]) {
-                (Some(left), Some(right)) if left == right => return None,
-                (Some(left), _) => table[second] = 1 - left,
-                (_, Some(right)) => table[first] = 1 - right,
-                (None, None) => table[second] = 1,
-            }
-        }
-        Some(table)
+        None
     }
 
     fn is_test_vector_valid(&self, table: &[u8]) -> bool {
@@ -1241,61 +1221,6 @@ fn linear_table(coefficients: &[i64]) -> Vec<i64> {
     table
 }
 
-fn canonicalize_candidate_cache_key(
-    truth_table: &[u8],
-    xy: &[(i64, i64)],
-) -> (CandidateCacheKey, CandidateCacheTransform) {
-    let mut bases = [
-        (
-            xy.iter().map(|(left, _)| *left).collect::<Vec<_>>(),
-            0usize,
-            1i64,
-        ),
-        (
-            xy.iter().map(|(_, right)| *right).collect::<Vec<_>>(),
-            1usize,
-            1i64,
-        ),
-    ];
-    for (basis, _, sign) in &mut bases {
-        if basis
-            .iter()
-            .find(|value| **value != 0)
-            .is_some_and(|value| *value > 0)
-        {
-            for value in basis {
-                *value = -*value;
-            }
-            *sign = -1;
-        }
-    }
-    if bases[1].0 < bases[0].0 {
-        bases.swap(0, 1);
-    }
-    let [
-        (first_basis, first_position, first_sign),
-        (second_basis, second_position, second_sign),
-    ] = bases;
-    (
-        CandidateCacheKey {
-            truth_table: canonical_truth_table(truth_table),
-            first_basis,
-            second_basis,
-        },
-        CandidateCacheTransform {
-            canonical_to_original: [(first_position, first_sign), (second_position, second_sign)],
-        },
-    )
-}
-
-fn canonical_truth_table(truth_table: &[u8]) -> Vec<u8> {
-    if truth_table.first() == Some(&1) {
-        truth_table.iter().map(|value| 1 - value).collect()
-    } else {
-        truth_table.to_vec()
-    }
-}
-
 fn is_candidate_scale_pair(
     first: i64,
     second: i64,
@@ -1306,17 +1231,6 @@ fn is_candidate_scale_pair(
     !(first_basis_is_zero && first != 0 || second_basis_is_zero && second != 0)
         && (!canonical_sign || first > 0 || (first == 0 && second > 0))
         && gcd_i64(first, second) == 1
-}
-
-fn canonicalize_scale_pair(mut scales: (i64, i64)) -> (i64, i64) {
-    let divisor = gcd_i64(scales.0, scales.1).max(1);
-    scales.0 /= divisor;
-    scales.1 /= divisor;
-    if scales.0 < 0 || (scales.0 == 0 && scales.1 < 0) {
-        scales.0 = -scales.0;
-        scales.1 = -scales.1;
-    }
-    scales
 }
 
 fn normalize_coefficient_key(coefficients: &mut [i64], canonical_sign: bool) {
@@ -1680,22 +1594,34 @@ mod tests {
             let independent = CandidateWorkspace::new(left, right).independent_basis();
             let mut seen = HashSet::new();
             let mut best: Option<(CandidateScore, (i64, i64))> = None;
-            for a in 0..=right.span() as i64 {
-                for b in -(left.span() as i64)..=left.span() as i64 {
-                    if !is_candidate_scale_pair(
-                        a,
-                        b,
-                        xy.iter().all(|pair| pair.0 == 0),
-                        xy.iter().all(|pair| pair.1 == 0),
-                        canonical_sign,
-                    ) {
+            let a_minimum = if canonical_sign && left.span() >= right.span() {
+                -(right.span() as i64)
+            } else {
+                0
+            };
+            let b_minimum = if canonical_sign && left.span() >= right.span() {
+                0
+            } else {
+                -(left.span() as i64)
+            };
+            for a in a_minimum..=right.span() as i64 {
+                for b in b_minimum..=left.span() as i64 {
+                    if !canonical_sign
+                        && !is_candidate_scale_pair(
+                            a,
+                            b,
+                            xy.iter().all(|pair| pair.0 == 0),
+                            xy.iter().all(|pair| pair.1 == 0),
+                            false,
+                        )
+                    {
                         continue;
                     }
                     let coefficients =
                         combined_coefficients_for_support(left, right, (a, b), &support);
-                    if !independent {
+                    if !canonical_sign && !independent {
                         let mut key = coefficients.clone();
-                        normalize_coefficient_key(&mut key, canonical_sign);
+                        normalize_coefficient_key(&mut key, false);
                         if !seen.insert(key) {
                             continue;
                         }
@@ -1716,6 +1642,7 @@ mod tests {
                             .map(|(&node, &coefficient)| (coefficient, LutSignal::Node(node)))
                             .collect();
                         let mut probe = environment.clone();
+                        probe.set_multioutput_fbs(true);
                         let input = probe.linear(&terms, -*values.iter().min().unwrap());
                         environment.nodes.iter().any(|node| matches!(node, crate::lut::LutNode::Bootstrap { input: node, .. } if LutSignal::Node(*node) == input))
                     } else {
@@ -1723,7 +1650,11 @@ mod tests {
                     };
                     let bound = a.unsigned_abs() as u128 * (left.span() - 1) as u128
                         + b.unsigned_abs() as u128 * (right.span() - 1) as u128;
-                    let score = (u8::from(!reuse), bound, raw_energy(&values), norm2, a, b);
+                    let score = if canonical_sign {
+                        (u8::from(!reuse), bound, raw_energy(&values), 0, -a, -b)
+                    } else {
+                        (u8::from(!reuse), bound, raw_energy(&values), norm2, a, b)
+                    };
                     if best.as_ref().is_none_or(|(previous, _)| score < *previous) {
                         best = Some((score, (a, b)));
                     }
@@ -1915,15 +1846,12 @@ mod tests {
     }
 
     #[test]
-    fn fills_sparse_test_vectors_with_mixed_bits() {
+    fn rejects_sparse_test_vectors_requiring_mixed_filling() {
         let mapper = Mapper::new(MapConfig::default()).unwrap();
         let truth = [0, 0, 1, 1];
         let values = [-2, -1, 2, 3];
-        assert!(mapper.is_lut_valid(&truth, &values));
-        assert_eq!(
-            mapper.bootstrap_table(&truth, &values).unwrap(),
-            [0, 0, 0, 1, 1, 1]
-        );
+        assert!(!mapper.is_lut_valid(&truth, &values));
+        assert!(mapper.bootstrap_table(&truth, &values).is_err());
     }
 
     #[test]
@@ -1953,15 +1881,10 @@ mod tests {
                         .enumerate()
                         .filter_map(|(index, value)| value.map(|value| (index as i64, value)))
                         .unzip();
-                    let can_complete = (0..1usize << size).any(|assignment| {
-                        let table: Vec<_> = (0..size)
-                            .map(|index| ((assignment >> index) & 1) as u8)
-                            .collect();
-                        known
-                            .iter()
-                            .zip(&table)
-                            .all(|(value, actual)| value.is_none_or(|value| value == *actual))
-                            && mapper.is_test_vector_valid(&table)
+                    let can_complete = (0..=1).any(|missing| {
+                        let table: Vec<_> =
+                            known.iter().map(|value| value.unwrap_or(missing)).collect();
+                        mapper.is_test_vector_valid(&table)
                     });
                     let completed = mapper.composed_bootstrap_table(&truth, &values);
                     assert_eq!(
@@ -2203,29 +2126,6 @@ mod tests {
                 .unwrap()
                 != original
         }));
-    }
-
-    #[test]
-    fn candidate_cache_key_canonicalizes_safe_symmetries() {
-        let truth_table = vec![0, 1, 1, 0];
-        let xy = vec![(0, 0), (1, 2), (-1, 1), (2, -1)];
-        let (expected, expected_transform) = canonicalize_candidate_cache_key(&truth_table, &xy);
-
-        let complement: Vec<_> = truth_table.iter().map(|value| 1 - value).collect();
-        let transformed_xy: Vec<_> = xy.iter().map(|(left, right)| (-right, *left)).collect();
-        let (actual, actual_transform) =
-            canonicalize_candidate_cache_key(&complement, &transformed_xy);
-        assert_eq!(actual, expected);
-
-        let scales = (2, -1);
-        assert_eq!(
-            expected_transform.to_original(expected_transform.to_canonical(scales)),
-            scales
-        );
-        assert_eq!(
-            actual_transform.to_original(actual_transform.to_canonical(scales)),
-            scales
-        );
     }
 
     #[test]
