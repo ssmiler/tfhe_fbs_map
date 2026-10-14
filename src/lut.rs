@@ -55,6 +55,43 @@ pub struct LutCircuit {
     bootstrap_forms: HashMap<Vec<usize>, Vec<Vec<i64>>>,
 }
 
+pub(crate) struct BootstrapLookup {
+    basis: Vec<(usize, i64, i64)>,
+    constants: (i64, i64),
+    key: LutNode,
+}
+
+impl BootstrapLookup {
+    pub(crate) fn has_bootstrap(
+        &mut self,
+        circuit: &LutCircuit,
+        scales: (i64, i64),
+        constant: i64,
+    ) -> bool {
+        let LutNode::Linear {
+            terms,
+            constant: offset,
+        } = &mut self.key
+        else {
+            unreachable!()
+        };
+        terms.clear();
+        for &(node, left, right) in &self.basis {
+            let coefficient = scales.0 * left + scales.1 * right;
+            if coefficient != 0 {
+                terms.push((coefficient, node));
+            }
+        }
+        *offset = constant + scales.0 * self.constants.0 + scales.1 * self.constants.1;
+        let input = if terms.len() == 1 && terms[0].0 == 1 && *offset == 0 {
+            Some(terms[0].1)
+        } else {
+            circuit.cache.get(&self.key).copied()
+        };
+        input.is_some_and(|input| circuit.bootstrap_inputs.contains(&input))
+    }
+}
+
 impl LutCircuit {
     pub fn set_multioutput_fbs(&mut self, enabled: bool) {
         self.multioutput_fbs = enabled;
@@ -143,28 +180,43 @@ impl LutCircuit {
         (flattened, constant)
     }
 
-    pub(crate) fn linear_has_bootstrap(&self, terms: &[(i64, LutSignal)], constant: i64) -> bool {
-        if terms
-            .iter()
-            .any(|(_, signal)| matches!(signal, LutSignal::Node(id) if *id >= self.nodes.len()))
-        {
-            return false;
+    pub(crate) fn prepare_bootstrap_lookup(
+        &self,
+        basis: impl IntoIterator<Item = (usize, i64, i64)>,
+    ) -> Option<BootstrapLookup> {
+        let basis: Vec<_> = basis.into_iter().collect();
+        if basis.iter().any(|(node, _, _)| *node >= self.nodes.len()) {
+            return None;
         }
-        let (mut flattened, constant) = self.flatten_linear(terms, constant);
-        flattened.retain(|_, coefficient| *coefficient != 0);
-        let input = if flattened.len() == 1 && constant == 0 {
-            let (&id, &coefficient) = flattened.first_key_value().unwrap();
-            (coefficient == 1).then_some(id)
-        } else {
-            let terms = flattened
-                .into_iter()
-                .map(|(id, coefficient)| (coefficient, id))
-                .collect();
-            self.cache
-                .get(&LutNode::Linear { terms, constant })
-                .copied()
-        };
-        input.is_some_and(|input| self.bootstrap_inputs.contains(&input))
+        let left_terms: Vec<_> = basis
+            .iter()
+            .map(|&(node, left, _)| (left, LutSignal::Node(node)))
+            .collect();
+        let right_terms: Vec<_> = basis
+            .iter()
+            .map(|&(node, _, right)| (right, LutSignal::Node(node)))
+            .collect();
+        let (left, left_constant) = self.flatten_linear(&left_terms, 0);
+        let (right, right_constant) = self.flatten_linear(&right_terms, 0);
+        let mut aligned: BTreeMap<_, _> = left
+            .into_iter()
+            .map(|(node, coefficient)| (node, (coefficient, 0)))
+            .collect();
+        for (node, coefficient) in right {
+            aligned.entry(node).or_default().1 = coefficient;
+        }
+        let basis: Vec<_> = aligned
+            .into_iter()
+            .map(|(node, (left, right))| (node, left, right))
+            .collect();
+        Some(BootstrapLookup {
+            key: LutNode::Linear {
+                terms: Vec::with_capacity(basis.len()),
+                constant: 0,
+            },
+            basis,
+            constants: (left_constant, right_constant),
+        })
     }
 
     pub(crate) fn reusable_linear_coefficients(&self, support: &[usize]) -> Vec<Vec<i64>> {
@@ -591,6 +643,59 @@ mod tests {
         let z = circuit.linear(&[(2, b), (6, a)], 2);
         assert_eq!(y, z);
         assert_eq!(circuit.bounds(y), (2, 10));
+    }
+
+    #[test]
+    fn prepared_bootstrap_lookup_matches_linear_interning() {
+        let mut circuit = LutCircuit::default();
+        let a = circuit.input("a");
+        let b = circuit.input("b");
+        let x = circuit.linear(&[(2, a), (-1, b)], 3);
+        let y = circuit.linear(&[(-1, a), (3, b)], -2);
+        let LutSignal::Node(x_id) = x else {
+            unreachable!()
+        };
+        let LutSignal::Node(y_id) = y else {
+            unreachable!()
+        };
+        for signal in [a, x, y, circuit.linear(&[(2, x), (-1, y)], 1)] {
+            let (minimum, maximum) = circuit.bounds(signal);
+            let normalized = circuit.linear(&[(1, signal)], -minimum);
+            circuit
+                .bootstrap(normalized, vec![0; (maximum - minimum + 1) as usize])
+                .unwrap();
+        }
+        circuit.bootstrap(a, vec![0, 1]).unwrap();
+        let basis = [(y_id, 0, 1), (x_id, 1, 0)];
+        let mut lookup = circuit.prepare_bootstrap_lookup(basis).unwrap();
+        for left in -3..=3 {
+            for right in -3..=3 {
+                for constant in -16..=16 {
+                    let mut reference = circuit.clone();
+                    let input = reference.linear(&[(left, x), (right, y)], constant);
+                    let expected = matches!(input, LutSignal::Node(node) if circuit.bootstrap_inputs.contains(&node));
+                    assert_eq!(
+                        lookup.has_bootstrap(&circuit, (left, right), constant),
+                        expected
+                    );
+                }
+            }
+        }
+        assert!(
+            circuit
+                .prepare_bootstrap_lookup([(usize::MAX, 0, 0)])
+                .is_none()
+        );
+        let mut identity = circuit.prepare_bootstrap_lookup([(0, 1, 0)]).unwrap();
+        assert!(identity.has_bootstrap(&circuit, (1, 0), 0));
+        let mut empty = circuit.prepare_bootstrap_lookup([]).unwrap();
+        assert!(!empty.has_bootstrap(&circuit, (1, 1), 0));
+        let mut fresh = LutCircuit::default();
+        let a = fresh.input("a");
+        let mut lookup = fresh.prepare_bootstrap_lookup([(0, 1, 0)]).unwrap();
+        assert!(!lookup.has_bootstrap(&fresh, (1, 0), 0));
+        fresh.bootstrap(a, vec![0, 1]).unwrap();
+        assert!(lookup.has_bootstrap(&fresh, (1, 0), 0));
     }
 
     #[test]

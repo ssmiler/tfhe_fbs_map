@@ -815,6 +815,16 @@ impl Mapper {
         let mut best: Option<(CandidateScore, (i64, i64))> = None;
         let moments = EnergyMoments::new(&rows);
         let mut workspace = CandidateWorkspace::new(left, right);
+        let mut bootstrap_lookup = if self.config.multioutput_fbs {
+            environment.prepare_bootstrap_lookup(
+                union_support(&left.support, &right.support)
+                    .into_iter()
+                    .zip(&workspace.coefficient_basis)
+                    .map(|(node, &(left, right))| (node, left, right)),
+            )
+        } else {
+            None
+        };
         let independent_basis = workspace.independent_basis();
         let mut seen_coefficients = HashSet::new();
         for a in 0..=right_size {
@@ -834,23 +844,24 @@ impl Mapper {
                         continue;
                     }
                 }
+                let coefficient_bound = a.unsigned_abs() as u128 * (left_size - 1) as u128
+                    + b.unsigned_abs() as u128 * (right_size - 1) as u128;
+                // A larger bound can still win by reuse until the best reuse cost is zero.
+                if best.as_ref().is_some_and(|(score, _)| {
+                    (!self.config.multioutput_fbs || score.0 == 0) && coefficient_bound > score.1
+                }) {
+                    continue;
+                }
                 let Some((merged_norm2, minimum)) =
                     workspace.evaluate(self, rows.iter().copied(), (a, b))
                 else {
                     continue;
                 };
                 let energy = candidate_energy(&rows, moments.as_ref(), (a, b))?;
-                let coefficient_bound = a.unsigned_abs() as u128 * (left_size - 1) as u128
-                    + b.unsigned_abs() as u128 * (right_size - 1) as u128;
                 let reuse_cost = u8::from(
-                    !self.config.multioutput_fbs
-                        || !self.candidate_reuses_bootstrap(
-                            environment,
-                            left,
-                            right,
-                            (a, b),
-                            minimum,
-                        ),
+                    !bootstrap_lookup
+                        .as_mut()
+                        .is_some_and(|lookup| lookup.has_bootstrap(environment, (a, b), -minimum)),
                 );
                 let score = (reuse_cost, coefficient_bound, energy, merged_norm2, a, b);
                 if best
@@ -910,24 +921,6 @@ impl Mapper {
         })?;
         self.validate_cone(&cone)?;
         Ok(cone)
-    }
-
-    fn candidate_reuses_bootstrap(
-        &self,
-        environment: &LutCircuit,
-        left: &Cone,
-        right: &Cone,
-        scales: (i64, i64),
-        minimum: i64,
-    ) -> bool {
-        let support = union_support(&left.support, &right.support);
-        let coefficients = combined_coefficients_for_support(left, right, scales, &support);
-        let terms: Vec<_> = coefficients
-            .iter()
-            .zip(&support)
-            .map(|(coefficient, node)| (*coefficient, LutSignal::Node(*node)))
-            .collect();
-        environment.linear_has_bootstrap(&terms, -minimum)
     }
 
     fn reusable_cone_coefficients(
@@ -1327,18 +1320,15 @@ fn simplify_cone(mut cone: Cone) -> Result<Cone, String> {
 
 fn linear_table(coefficients: &[i64]) -> Vec<i64> {
     let count = 1usize << coefficients.len();
-    (0..count)
-        .map(|assignment| {
-            coefficients
-                .iter()
-                .enumerate()
-                .map(|(position, coefficient)| {
-                    let bit = (assignment >> (coefficients.len() - position - 1)) & 1;
-                    *coefficient * bit as i64
-                })
-                .sum()
-        })
-        .collect()
+    let mut table = Vec::with_capacity(count);
+    table.push(0);
+    // Expand low-order bits first to preserve Boolean assignment order.
+    for coefficient in coefficients.iter().rev() {
+        for index in 0..table.len() {
+            table.push(table[index] + coefficient);
+        }
+    }
+    table
 }
 
 fn canonicalize_candidate_cache_key(
@@ -1738,6 +1728,187 @@ mod tests {
             Some(3 * (i64::MAX as u128).pow(2))
         );
         assert_eq!(candidate_energy(&rows, None, (2, 0)), None);
+    }
+
+    #[test]
+    fn incremental_linear_tables_match_assignment_sums() {
+        for length in 0..=5 {
+            for encoding in 0..5usize.pow(length) {
+                let coefficients: Vec<_> = (0..length)
+                    .map(|position| ((encoding / 5usize.pow(position)) % 5) as i64 - 2)
+                    .collect();
+                let expected: Vec<i64> = (0..1usize << length)
+                    .map(|assignment| {
+                        coefficients
+                            .iter()
+                            .enumerate()
+                            .map(|(position, coefficient)| {
+                                coefficient
+                                    * ((assignment >> (coefficients.len() - position - 1)) & 1)
+                                        as i64
+                            })
+                            .sum()
+                    })
+                    .collect();
+                assert_eq!(linear_table(&coefficients), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn pruned_search_matches_unpruned_full_table_reference() {
+        fn reference(
+            mapper: &Mapper,
+            environment: &LutCircuit,
+            left: &Cone,
+            right: &Cone,
+            xy: &[(i64, i64)],
+            truth: &[u8],
+        ) -> Option<(i64, i64)> {
+            let support = union_support(&left.support, &right.support);
+            let canonical_sign = !mapper.config.multioutput_fbs;
+            let independent = CandidateWorkspace::new(left, right).independent_basis();
+            let mut seen = HashSet::new();
+            let mut best: Option<(CandidateScore, (i64, i64))> = None;
+            for a in 0..=right.span() as i64 {
+                for b in -(left.span() as i64)..=left.span() as i64 {
+                    if !is_candidate_scale_pair(
+                        a,
+                        b,
+                        xy.iter().all(|pair| pair.0 == 0),
+                        xy.iter().all(|pair| pair.1 == 0),
+                        canonical_sign,
+                    ) {
+                        continue;
+                    }
+                    let coefficients =
+                        combined_coefficients_for_support(left, right, (a, b), &support);
+                    if !independent {
+                        let mut key = coefficients.clone();
+                        normalize_coefficient_key(&mut key, canonical_sign);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                    }
+                    let values: Vec<_> = xy.iter().map(|&(x, y)| a * x + b * y).collect();
+                    let norm2 = coefficients_norm2(&coefficients);
+                    if !mapper.is_lut_valid(truth, &values)
+                        || mapper.config.max_norm2.is_some_and(|limit| norm2 > limit)
+                    {
+                        continue;
+                    }
+                    let reuse = if mapper.config.multioutput_fbs
+                        && support.iter().all(|node| *node < environment.nodes.len())
+                    {
+                        let terms: Vec<_> = support
+                            .iter()
+                            .zip(&coefficients)
+                            .map(|(&node, &coefficient)| (coefficient, LutSignal::Node(node)))
+                            .collect();
+                        let mut probe = environment.clone();
+                        let input = probe.linear(&terms, -*values.iter().min().unwrap());
+                        environment.nodes.iter().any(|node| matches!(node, crate::lut::LutNode::Bootstrap { input: node, .. } if LutSignal::Node(*node) == input))
+                    } else {
+                        false
+                    };
+                    let bound = a.unsigned_abs() as u128 * (left.span() - 1) as u128
+                        + b.unsigned_abs() as u128 * (right.span() - 1) as u128;
+                    let score = (u8::from(!reuse), bound, raw_energy(&values), norm2, a, b);
+                    if best.as_ref().is_none_or(|(previous, _)| score < *previous) {
+                        best = Some((score, (a, b)));
+                    }
+                }
+            }
+            best.map(|(_, scales)| scales)
+        }
+        let cone = |support: Vec<usize>, coefficients: Vec<i64>, truth_table: Vec<u8>| Cone {
+            multivalue_table: linear_table(&coefficients),
+            support,
+            coefficients,
+            truth_table,
+        };
+        let cases = [
+            (Cone::identity(0), Cone::identity(1)),
+            (
+                cone(vec![0, 1], vec![1, 1], vec![0, 1, 1, 0]),
+                Cone::identity(2),
+            ),
+            (
+                cone(vec![1, 0], vec![2, -1], vec![0, 1, 1, 0]),
+                cone(vec![0, 1], vec![-2, 1], vec![0, 0, 0, 1]),
+            ),
+            (
+                cone(vec![0, 1], vec![1, -1], vec![0, 1, 1, 0]),
+                cone(vec![0, 1], vec![2, -2], vec![0, 1, 1, 0]),
+            ),
+            (Cone::constant(0), Cone::identity(0)),
+            (Cone::identity_dummy(), Cone::identity(0)),
+        ];
+        let mut environment = LutCircuit::default();
+        let a = environment.input("a");
+        let b = environment.input("b");
+        environment.input("c");
+        for with_reuse in [false, true] {
+            if with_reuse {
+                let input = environment.linear(&[(2, a), (1, b)], 0);
+                environment.bootstrap(input, vec![0, 0, 0, 1]).unwrap();
+                environment.bootstrap(a, vec![0, 1]).unwrap();
+                let mapper = Mapper::new(MapConfig {
+                    fbs_size: 4,
+                    max_fbs_size: 8,
+                    multioutput_fbs: true,
+                    ..MapConfig::default()
+                })
+                .unwrap();
+                let (left, right) = &cases[0];
+                let (xy, truth) = cone_composition_tables(left, right, &[0, 0, 0, 1]).unwrap();
+                assert_eq!(
+                    mapper
+                        .search_candidate(&environment, left, right, &xy, &truth, false)
+                        .unwrap()
+                        .scales,
+                    (2, 1)
+                );
+            }
+            for fbs_size in [2, 4, 8] {
+                for max_fbs_size in [fbs_size, 2 * fbs_size] {
+                    for max_norm2 in [None, Some(5)] {
+                        for multioutput_fbs in [false, true] {
+                            let mapper = Mapper::new(MapConfig {
+                                fbs_size,
+                                max_fbs_size,
+                                max_norm2,
+                                multioutput_fbs,
+                                ..MapConfig::default()
+                            })
+                            .unwrap();
+                            for (left, right) in &cases {
+                                for gate in 0..16 {
+                                    let table: Vec<_> =
+                                        (0..4).map(|index| ((gate >> index) & 1) as u8).collect();
+                                    let (xy, truth) =
+                                        cone_composition_tables(left, right, &table).unwrap();
+                                    assert_eq!(
+                                        mapper
+                                            .search_candidate(
+                                                &environment,
+                                                left,
+                                                right,
+                                                &xy,
+                                                &truth,
+                                                !multioutput_fbs
+                                            )
+                                            .map(|candidate| candidate.scales),
+                                        reference(&mapper, &environment, left, right, &xy, &truth),
+                                        "p={fbs_size}, max={max_fbs_size}, norm={max_norm2:?}, multi={multioutput_fbs}, reuse={with_reuse}, gate={gate}, left={left:?}, right={right:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
