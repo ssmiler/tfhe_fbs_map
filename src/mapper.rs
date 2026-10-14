@@ -394,14 +394,6 @@ impl Mapper {
             wires[*id] = Some(Cone::identity(node));
         }
 
-        let mut gate_fanout = vec![0usize; circuit.nodes.len()];
-        for node in &circuit.nodes {
-            for input in node.inputs() {
-                if let BoolWire::Node(id) = input {
-                    gate_fanout[*id] += 1;
-                }
-            }
-        }
         let mut forced_outputs = vec![false; circuit.nodes.len()];
         for (_, output) in &circuit.outputs {
             if let BoolWire::Node(id) = output {
@@ -433,10 +425,7 @@ impl Mapper {
                 }
             }
 
-            let eager_shared =
-                gate_fanout[gate_id] > 1 && cone.span().saturating_mul(2) > self.config.fbs_size;
-            let cone = if !self.config.multioutput_fbs && (forced_outputs[gate_id] || eager_shared)
-            {
+            let cone = if !self.config.multioutput_fbs && forced_outputs[gate_id] {
                 self.bootstrap_cone(&mut environment, cone)?
             } else {
                 cone
@@ -654,63 +643,30 @@ impl Mapper {
             return Ok((cone, updates));
         }
 
-        let reset_left = Cone::identity_dummy();
-        let (xy_left, truth_left) = cone_composition_tables(&reset_left, &right, &gate_table)?;
-        let candidate_left = self.find_candidate(
-            environment,
-            &reset_left,
-            &right,
-            &xy_left,
-            &truth_left,
-            candidate_cache,
-        );
-        let reset_right = Cone::identity_dummy();
-        let (xy_right, truth_right) = cone_composition_tables(&left, &reset_right, &gate_table)?;
-        let candidate_right = self.find_candidate(
+        left = self.bootstrap_cone(environment, left)?;
+        updates[left_position] = Some(left.clone());
+        let (xy, truth_table) = cone_composition_tables(&left, &right, &gate_table)?;
+        if all_equal(&truth_table) {
+            return Ok((Cone::constant(truth_table[0]), updates));
+        }
+        if let Some(candidate) = self.find_candidate(
             environment,
             &left,
-            &reset_right,
-            &xy_right,
-            &truth_right,
+            &right,
+            &xy,
+            &truth_table,
             candidate_cache,
-        );
-
-        if all_equal(&truth_left) {
-            left = self.bootstrap_cone(environment, left)?;
-            updates[left_position] = Some(left);
-            return Ok((Cone::constant(truth_left[0]), updates));
-        }
-        if all_equal(&truth_right) {
-            right = self.bootstrap_cone(environment, right)?;
-            updates[right_position] = Some(right);
-            return Ok((Cone::constant(truth_right[0]), updates));
+        ) {
+            let cone = self.merge_cones(left, right, candidate, truth_table)?;
+            return Ok((cone, updates));
         }
 
-        let decision = self.choose_bootstrap(
-            environment,
-            candidate_left.as_ref().map(|candidate| (candidate, &left)),
-            candidate_right
-                .as_ref()
-                .map(|candidate| (candidate, &right)),
-        );
-        match decision {
-            BootstrapDecision::Left => {
-                left = self.bootstrap_cone(environment, left)?;
-                updates[left_position] = Some(left.clone());
-            }
-            BootstrapDecision::Right => {
-                right = self.bootstrap_cone(environment, right)?;
-                updates[right_position] = Some(right.clone());
-            }
-            BootstrapDecision::Both => {
-                left = self.bootstrap_cone(environment, left)?;
-                right = self.bootstrap_cone(environment, right)?;
-                updates[left_position] = Some(left.clone());
-                updates[right_position] = Some(right.clone());
-            }
-        }
-
+        right = self.bootstrap_cone(environment, right)?;
+        updates[right_position] = Some(right.clone());
         let (xy, truth_table) = cone_composition_tables(&left, &right, &gate_table)?;
+        if all_equal(&truth_table) {
+            return Ok((Cone::constant(truth_table[0]), updates));
+        }
         let candidate = self
             .find_candidate(
                 environment,
@@ -725,38 +681,6 @@ impl Mapper {
             })?;
         let cone = self.merge_cones(left, right, candidate, truth_table)?;
         Ok((cone, updates))
-    }
-
-    fn choose_bootstrap(
-        &self,
-        environment: &LutCircuit,
-        left: Option<(&Candidate, &Cone)>,
-        right: Option<(&Candidate, &Cone)>,
-    ) -> BootstrapDecision {
-        match (left, right) {
-            (Some(_), None) => BootstrapDecision::Left,
-            (None, Some(_)) => BootstrapDecision::Right,
-            (None, None) => BootstrapDecision::Both,
-            (Some((left_candidate, left_cone)), Some((right_candidate, right_cone))) => {
-                if self.config.multioutput_fbs {
-                    let left_cost = self.bootstrap_incremental_cost(environment, left_cone);
-                    let right_cost = self.bootstrap_incremental_cost(environment, right_cone);
-                    if left_cost < right_cost {
-                        return BootstrapDecision::Left;
-                    }
-                    if right_cost < left_cost {
-                        return BootstrapDecision::Right;
-                    }
-                }
-                if table_span(&left_candidate.multivalue_table)
-                    <= table_span(&right_candidate.multivalue_table)
-                {
-                    BootstrapDecision::Left
-                } else {
-                    BootstrapDecision::Right
-                }
-            }
-        }
     }
 
     fn find_candidate(
@@ -951,14 +875,6 @@ impl Mapper {
             }
         }
         best.map(|(_, coefficients)| coefficients)
-    }
-
-    fn bootstrap_incremental_cost(&self, environment: &LutCircuit, cone: &Cone) -> usize {
-        if cone.support.len() <= 1 || self.reusable_cone_coefficients(environment, cone).is_some() {
-            0
-        } else {
-            1
-        }
     }
 
     fn bootstrap_cone(&self, environment: &mut LutCircuit, mut cone: Cone) -> Result<Cone, String> {
@@ -1156,17 +1072,11 @@ impl Mapper {
     }
 }
 
+#[cfg(test)]
 impl Cone {
     fn identity_dummy() -> Self {
         Self::identity(usize::MAX)
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BootstrapDecision {
-    Left,
-    Right,
-    Both,
 }
 
 fn cone_order_key(cone: &Cone) -> (usize, u128) {
@@ -2128,7 +2038,11 @@ mod tests {
             multivalue_table: vec![0, 1, 1, 2],
         };
 
-        assert_eq!(mapper.bootstrap_incremental_cost(&mapped, &second), 0);
+        assert!(
+            mapper
+                .reusable_cone_coefficients(&mapped, &second)
+                .is_some()
+        );
         let second = mapper.bootstrap_cone(&mut mapped, second).unwrap();
         mapped.add_output("and".into(), LutSignal::Node(first.support[0]));
         mapped.add_output("xor".into(), LutSignal::Node(second.support[0]));

@@ -7,8 +7,14 @@ The command exposes three mapping policies.
 - `naive` composes two-input cones using the original fixed-coefficient rule and
   bootstraps when the resulting encoding is not valid.
 - `search` examines coefficient pairs in increasing resulting FBS size and uses
-  the smallest valid composition. If composition fails, it bootstraps the
-  predecessor that gives the smaller next cone.
+  the smallest valid composition.
+
+The `naive` and `search` policies use the Python mapper's bootstrap boundaries.
+Shared cones are retained until composition requires a bootstrap; fanout alone
+does not force one. Input cones are ordered by span, then squared coefficient
+norm, with the larger cone first. If composition fails, that cone is bootstrapped
+and composition is retried. The second input is bootstrapped only if the retry
+also fails. Circuit outputs are bootstrapped eagerly in ordinary mode.
 
 Unreachable LUT entries are filled independently when needed to satisfy the
 negacyclic constraints. Uniform zero or one filling is retained when valid.
