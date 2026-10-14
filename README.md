@@ -79,15 +79,21 @@ cargo build --release --manifest-path concrete/compilers/concrete-optimizer/Carg
 
 ### Run the benchmarks
 
-The sequential ISCAS89 circuits are unrolled into ten frames by
-`unroll_bench.py`, with one additional input per flip-flop for its initial state
-(`latch_name__f0`). Each later frame receives the previous frame's next-state
-value. No external logic-synthesis tool is required. The generated combinational
-BENCH files are then read directly by the Rust mapper.
+Install [ABC](https://github.com/berkeley-abc/abc) and `libreadline` (required to
+compile ABC). The installer pins ABC to revision `9478c17`, as in the Python
+experiment pipeline.
 
 ```bash
-python3 unroll_bench.py input.bench output.bench --frames 10
+apt install libreadline-dev
+bash install_abc.sh
 ```
+
+ISCAS85 BENCH circuits are mapped with `lib.genlib`, unmapped, and exported to
+BLIF. ISCAS89 circuits are unrolled with `frames -F 10 -i` and exported to BLIF;
+their unspecified initial DFF states become additional inputs. The generated
+files are stored in `outputs/benchmarks_xag/iscas85` and
+`outputs/benchmarks_xag/iscas89`, then read by the Rust mapper. EPFL, generated,
+and Bristol circuits retain their original preprocessing behavior.
 
 Use the following script to execute all the benchmarks (it should take less than 20 minutes):
 

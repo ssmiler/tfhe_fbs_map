@@ -1,5 +1,8 @@
 #! /bin/bash
 
+# clone and compile abc
+[ -f abc/abc ] || ( bash install_abc.sh ) || exit
+
 # wget benchmarks
 [ -d benchmarks/iscas89 ] || ( echo "Wget benchmarks" && wget -nd -r -l1 -A "*.bench" https://pld.ttu.ee/~maksim/benchmarks/iscas89/bench -P benchmarks/iscas89 ) || exit
 
@@ -50,7 +53,7 @@ FBS_SIZES=$(seq 2 32)
 
 FBS_MAP="../target/release/fbs-map"
 
-BENCH_UNROLLED_DIR=outputs/iscas89_unrolled
+BENCH_XAG_DIR=outputs/benchmarks_xag/iscas89
 OUTPUT_DIR=outputs/iscas89
 
 rm -f Makefile
@@ -63,24 +66,24 @@ echo -e "\t@echo" >> Makefile
 echo -e "\t@echo" >> Makefile
 echo >> Makefile
 
-# targets for unrolling sequential benchmarks into combinational BENCH files
-echo "$BENCH_UNROLLED_DIR:" >> Makefile
-echo -e "\t@mkdir -p $BENCH_UNROLLED_DIR" >> Makefile
+# targets for unrolling sequential benchmarks into combinational BLIF files
+echo "$BENCH_XAG_DIR:" >> Makefile
+echo -e "\t@mkdir -p $BENCH_XAG_DIR" >> Makefile
 echo >> Makefile
-ALL+=" $BENCH_UNROLLED_DIR"
+ALL+=" $BENCH_XAG_DIR"
 
-UNROLLED_BENCHES=""
+BLIFS=""
 for BENCH in $BENCHES
 do
     BENCH_BASE=$(basename -- "$BENCH" .bench)
-    UNROLLED="$BENCH_UNROLLED_DIR/$BENCH_BASE.bench"
+    BLIF="$BENCH_XAG_DIR/$BENCH_BASE.blif"
 
-    echo "$UNROLLED: $BENCH unroll_bench.py | $BENCH_UNROLLED_DIR" >> Makefile
-    echo -e "\tpython3 unroll_bench.py $BENCH $UNROLLED --frames 10" >> Makefile
+    echo "$BLIF: $BENCH abc/abc | $BENCH_XAG_DIR" >> Makefile
+    echo -e "\t./abc/abc -c \"read_bench $BENCH; frames -F 10 -i; write_blif $BLIF\"" >> Makefile
     echo >> Makefile
-    UNROLLED_BENCHES+=" $UNROLLED"
+    BLIFS+=" $BLIF"
 done
-ALL+=" $UNROLLED_BENCHES"
+ALL+=" $BLIFS"
 
 # targets for mapping bench circuits to FBSs
 echo "$OUTPUT_DIR:" >> Makefile
@@ -104,9 +107,9 @@ function run_bench() {
     echo ""
 }
 
-for CIRCUIT in $UNROLLED_BENCHES
+for CIRCUIT in $BLIFS
 do
-    BENCH=$(basename -- "$CIRCUIT" .bench)
+    BENCH=$(basename -- "$CIRCUIT" .blif)
 
     for MAPPER in "basic"
     do

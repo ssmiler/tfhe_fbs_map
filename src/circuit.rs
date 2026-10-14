@@ -53,10 +53,7 @@ impl BoolCircuit {
     pub fn parse_blif(source: &str) -> Result<Self, String> {
         let lines = logical_lines(source);
         let mut circuit = Self::default();
-        let mut wires: HashMap<String, BoolWire> = HashMap::from([
-            ("0".to_owned(), BoolWire::Const(false)),
-            ("1".to_owned(), BoolWire::Const(true)),
-        ]);
+        let mut wires: HashMap<String, BoolWire> = HashMap::new();
         let mut output_names = Vec::new();
         let mut i = 0;
 
