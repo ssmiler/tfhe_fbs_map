@@ -1,7 +1,7 @@
 #! /bin/bash
 
 # clone and compile abc
-[ -f abc/abc ] || ( bash install_abc.sh  ) || exit
+[ -f abc/abc ] || ( bash install_abc.sh ) || exit
 
 # clone EPFL benchmarks
 [ -d benchmarks/epfl ] || ( echo "Clone EPFL circuit benchmark" && git clone https://github.com/lsils/benchmarks benchmarks/epfl ) || exit
@@ -11,7 +11,7 @@ BENCHES+=" "$(ls benchmarks/epfl/random_control/*.blif)
 
 FBS_SIZES=$(seq 3 16)
 
-MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
+FBS_MAP="../target/release/fbs-map"
 
 OUTPUT_DIR=outputs/epfl
 
@@ -43,7 +43,7 @@ function run_bench() {
     ALL+=" ${OUT_LBF}"
 
     echo "$OUT $OUT_LBF $LOG: $BLIF | $OUTPUT_DIR"
-    echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --output_lbf ${OUT_LBF} > $LOG 2>&1"
+    echo -e "\t$FBS_MAP $BLIF --fbs-size $FBS_SIZE --mapper $MAPPER --output $OUT --output-lbf ${OUT_LBF} > $LOG 2>&1"
     echo ""
 }
 
