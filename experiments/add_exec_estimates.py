@@ -37,6 +37,7 @@ if __name__ == '__main__':
 
         df.sort_values(["bench", "mapper", "fbs_size"], inplace=True)
         df["boot_cost"] = df.apply(get_boot_cost, axis=1)
+        df["total_cost"] = df["boot_cost"] * df["nb_bootstrap"] 
 
         out_name = name.replace(".csv", "_est.csv")
         df.to_csv(out_name, index=False)

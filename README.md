@@ -89,7 +89,7 @@ BENCH files are then read directly by the Rust mapper.
 python3 unroll_bench.py input.bench output.bench --frames 10
 ```
 
-Use the following script to execute all the benchmarks (it should take less than 2 hours):
+Use the following script to execute all the benchmarks (it should take less than 20 minutes):
 
 ```bash
 bash run_benchmarks.sh
