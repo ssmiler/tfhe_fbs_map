@@ -1,0 +1,17 @@
+nb_inp,nb_linprod,nb_bootstrap,max_lut_size,norm2_linprod,nb_out,filename,fbs_size,mapper,multioutput_fbs,strict_fbs_size,max_tt_size,max_fbs_size,max_norm2,trials,time,bench,boot_cost,total_cost
+256,34576,34576,4,5,128,benchmarks/bristol/aes_128.txt,2,basic,False,False,16,4,,1,0.137575974,aes_128,29,1002704
+256,33976,34820,3,2,128,benchmarks/bristol/aes_128.txt,2,search,False,False,16,4,,1,0.269545018,aes_128,29,1009780
+256,22343,22477,6,11,128,benchmarks/bristol/aes_128.txt,3,search,False,False,16,6,,1,0.227583755,aes_128,38,854126
+256,23284,23467,6,9,128,benchmarks/bristol/aes_128.txt,4,search,False,False,16,8,,1,0.191550202,aes_128,40,938680
+256,20203,20266,10,31,128,benchmarks/bristol/aes_128.txt,5,search,False,False,16,10,,1,1.544743012,aes_128,42,851172
+256,19090,19191,12,47,128,benchmarks/bristol/aes_128.txt,6,search,False,False,16,12,,1,0.364275042,aes_128,44,844404
+256,19203,19262,14,75,128,benchmarks/bristol/aes_128.txt,7,search,False,False,16,14,,1,2.738451284,aes_128,46,886052
+256,18327,18420,16,85,128,benchmarks/bristol/aes_128.txt,8,search,False,False,16,16,,1,0.909245739,aes_128,60,1105200
+256,17846,17918,18,101,128,benchmarks/bristol/aes_128.txt,9,search,False,False,16,18,,1,3.793258704,aes_128,61,1092998
+256,17247,17316,20,129,128,benchmarks/bristol/aes_128.txt,10,search,False,False,16,20,,1,2.585369602,aes_128,64,1108224
+256,17704,17793,22,155,128,benchmarks/bristol/aes_128.txt,11,search,False,False,16,22,,1,3.847313373,aes_128,69,1227717
+256,17459,17539,24,189,128,benchmarks/bristol/aes_128.txt,12,search,False,False,16,24,,1,2.736231159,aes_128,70,1227730
+256,17726,17808,26,217,128,benchmarks/bristol/aes_128.txt,13,search,False,False,16,26,,1,3.117151737,aes_128,71,1264368
+256,16992,17076,28,253,128,benchmarks/bristol/aes_128.txt,14,search,False,False,16,28,,1,3.231264167,aes_128,72,1229472
+256,17022,17119,30,311,128,benchmarks/bristol/aes_128.txt,15,search,False,False,16,30,,1,3.393629674,aes_128,73,1249687
+256,16678,16767,32,341,128,benchmarks/bristol/aes_128.txt,16,search,False,False,16,32,,1,3.797742895,aes_128,74,1240758

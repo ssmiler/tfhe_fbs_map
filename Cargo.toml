@@ -1,0 +1,14 @@
+[package]
+name = "tfhe-fbs-map"
+version = "0.1.0"
+edition = "2024"
+description = "Fast heuristics for mapping Boolean circuits to TFHE functional bootstraps"
+license = "MIT"
+
+[[bin]]
+name = "fbs-map"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
