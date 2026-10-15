@@ -771,9 +771,9 @@ impl Mapper {
                         .is_some_and(|lookup| lookup.has_bootstrap(environment, (a, b), -minimum)),
                 );
                 let score = if python_rules {
-                    (reuse_cost, coefficient_bound, energy, 0, -a, -b)
+                    (reuse_cost, coefficient_bound, merged_norm2, energy, -a, -b)
                 } else {
-                    (reuse_cost, coefficient_bound, energy, merged_norm2, a, b)
+                    (reuse_cost, coefficient_bound, merged_norm2, energy, a, b)
                 };
                 if best
                     .as_ref()
@@ -1651,9 +1651,9 @@ mod tests {
                     let bound = a.unsigned_abs() as u128 * (left.span() - 1) as u128
                         + b.unsigned_abs() as u128 * (right.span() - 1) as u128;
                     let score = if canonical_sign {
-                        (u8::from(!reuse), bound, raw_energy(&values), 0, -a, -b)
+                        (u8::from(!reuse), bound, norm2, raw_energy(&values), -a, -b)
                     } else {
-                        (u8::from(!reuse), bound, raw_energy(&values), norm2, a, b)
+                        (u8::from(!reuse), bound, norm2, raw_energy(&values), a, b)
                     };
                     if best.as_ref().is_none_or(|(previous, _)| score < *previous) {
                         best = Some((score, (a, b)));
@@ -1749,6 +1749,61 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn search_prefers_coefficient_norm_before_mvt_energy() {
+        let left = Cone {
+            support: vec![0, 1, 2],
+            coefficients: vec![1, 0, -3],
+            truth_table: vec![0, 1, 0, 1, 1, 0, 1, 0],
+            multivalue_table: linear_table(&[1, 0, -3]),
+        };
+        let right = Cone {
+            support: vec![0, 1, 2],
+            coefficients: vec![1, 3, 0],
+            truth_table: vec![1, 1, 0, 0, 0, 0, 0, 0],
+            multivalue_table: linear_table(&[1, 3, 0]),
+        };
+        let (xy, truth) = cone_composition_tables(&left, &right, &[0, 0, 1, 0]).unwrap();
+        let environment = LutCircuit::default();
+        for multioutput_fbs in [false, true] {
+            let mapper = Mapper::new(MapConfig {
+                fbs_size: 16,
+                max_fbs_size: 16,
+                multioutput_fbs,
+                ..MapConfig::default()
+            })
+            .unwrap();
+            let lower_energy = mapper
+                .make_candidate(&left, &right, &xy, &truth, (1, 2))
+                .unwrap();
+            let candidate = mapper
+                .find_candidate(
+                    &environment,
+                    &left,
+                    &right,
+                    &xy,
+                    &truth,
+                    &mut HashMap::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                candidate.scales,
+                if multioutput_fbs { (2, -1) } else { (-2, 1) }
+            );
+            assert_eq!(
+                coefficients_norm2(&combined_coefficients_for_support(
+                    &left,
+                    &right,
+                    candidate.scales,
+                    &left.support,
+                )),
+                46
+            );
+            assert_eq!(raw_energy(&candidate.multivalue_table), 220);
+            assert_eq!(raw_energy(&lower_energy.multivalue_table), 180);
         }
     }
 
