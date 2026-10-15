@@ -976,23 +976,18 @@ impl Mapper {
             return true;
         }
 
-        // Python tries uniform zero and uniform one filling, in that order.
-        let mut antipodal_zero = true;
-        let mut antipodal_one = true;
+        let mut antipodal = true;
         let mut all_zero = true;
         let mut all_one = true;
         for (&left, &right) in known[..size - self.config.fbs_size]
             .iter()
             .zip(&known[self.config.fbs_size..])
         {
-            antipodal_zero &=
-                (if left == 2 { 0 } else { left }) != (if right == 2 { 0 } else { right });
-            antipodal_one &=
-                (if left == 2 { 1 } else { left }) != (if right == 2 { 1 } else { right });
+            antipodal &= left == 2 || right == 2 || left != right;
             all_zero &= left != 1 && right != 1;
             all_one &= left != 0 && right != 0;
         }
-        antipodal_zero || antipodal_one || all_zero || all_one
+        antipodal || all_zero || all_one
     }
 
     fn bootstrap_table(
@@ -1033,7 +1028,19 @@ impl Mapper {
             }
         }
 
-        None
+        let overlap = size.checked_sub(self.config.fbs_size)?;
+        let mut table: Vec<_> = known.iter().map(|value| value.unwrap_or(0)).collect();
+        for index in 0..overlap {
+            let opposite = index + self.config.fbs_size;
+            match (known[index], known[opposite]) {
+                (Some(left), Some(right)) if left != right => {}
+                (Some(_), Some(_)) => return None,
+                (Some(left), None) => table[opposite] = 1 - left,
+                (None, Some(right)) => table[index] = 1 - right,
+                (None, None) => table[opposite] = 1,
+            }
+        }
+        self.is_test_vector_valid(&table).then_some(table)
     }
 
     fn is_test_vector_valid(&self, table: &[u8]) -> bool {
@@ -1846,12 +1853,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_sparse_test_vectors_requiring_mixed_filling() {
+    fn completes_sparse_test_vectors_with_mixed_filling() {
         let mapper = Mapper::new(MapConfig::default()).unwrap();
         let truth = [0, 0, 1, 1];
         let values = [-2, -1, 2, 3];
-        assert!(!mapper.is_lut_valid(&truth, &values));
-        assert!(mapper.bootstrap_table(&truth, &values).is_err());
+        assert!(mapper.is_lut_valid(&truth, &values));
+        assert_eq!(
+            mapper.bootstrap_table(&truth, &values).unwrap(),
+            [0, 0, 0, 1, 1, 1]
+        );
     }
 
     #[test]
@@ -1881,9 +1891,17 @@ mod tests {
                         .enumerate()
                         .filter_map(|(index, value)| value.map(|value| (index as i64, value)))
                         .unzip();
-                    let can_complete = (0..=1).any(|missing| {
-                        let table: Vec<_> =
-                            known.iter().map(|value| value.unwrap_or(missing)).collect();
+                    let missing: Vec<_> = known
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, value)| value.is_none().then_some(index))
+                        .collect();
+                    let can_complete = (0..1usize << missing.len()).any(|assignment| {
+                        let mut table: Vec<_> =
+                            known.iter().map(|value| value.unwrap_or(0)).collect();
+                        for (bit, index) in missing.iter().enumerate() {
+                            table[*index] = ((assignment >> bit) & 1) as u8;
+                        }
                         mapper.is_test_vector_valid(&table)
                     });
                     let completed = mapper.composed_bootstrap_table(&truth, &values);
