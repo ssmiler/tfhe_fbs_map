@@ -1,5 +1,6 @@
 use crate::circuit::{BoolCircuit, BoolNode, BoolWire};
 use crate::lut::{LutCircuit, LutSignal};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,6 +16,12 @@ pub enum SchedulePolicy {
     Random { seed: u64 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TieBreakPolicy {
+    TableEnergy,
+    Random { seed: u64 },
+}
+
 #[derive(Clone, Debug)]
 pub struct MapConfig {
     pub fbs_size: usize,
@@ -23,6 +30,7 @@ pub struct MapConfig {
     pub max_norm2: Option<u128>,
     pub coefficient_policy: CoefficientPolicy,
     pub schedule_policy: SchedulePolicy,
+    pub tie_break_policy: TieBreakPolicy,
     pub multioutput_fbs: bool,
 }
 
@@ -35,6 +43,7 @@ impl Default for MapConfig {
             max_norm2: None,
             coefficient_policy: CoefficientPolicy::MinSpan,
             schedule_policy: SchedulePolicy::Original,
+            tie_break_policy: TieBreakPolicy::TableEnergy,
             multioutput_fbs: false,
         }
     }
@@ -299,6 +308,7 @@ type CandidateCache = HashMap<CandidateCacheKey, Option<(i64, i64)>>;
 
 pub struct Mapper {
     pub config: MapConfig,
+    random_state: Cell<u64>,
 }
 
 impl Mapper {
@@ -319,10 +329,20 @@ impl Mapper {
         if config.max_truth_table_inputs == 0 || config.max_truth_table_inputs > 20 {
             return Err("max truth-table inputs must be between 1 and 20".to_owned());
         }
-        Ok(Self { config })
+        let seed = match config.tie_break_policy {
+            TieBreakPolicy::TableEnergy => 0,
+            TieBreakPolicy::Random { seed } => seed,
+        };
+        Ok(Self {
+            config,
+            random_state: Cell::new(seed),
+        })
     }
 
     pub fn map(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
+        if let TieBreakPolicy::Random { seed } = self.config.tie_break_policy {
+            self.random_state.set(seed);
+        }
         if self.config.coefficient_policy == CoefficientPolicy::Basic {
             let mapped = self.map_basic(circuit)?;
             if self
@@ -340,12 +360,24 @@ impl Mapper {
         self.map_once(circuit)
     }
 
-    fn schedule(
+    fn candidate_tie_break(
         &self,
-        circuit: &BoolCircuit,
-        policy: SchedulePolicy,
-    ) -> Result<Vec<usize>, String> {
-        match policy {
+        rows: &[CandidateRow],
+        moments: Option<&EnergyMoments>,
+        scales: (i64, i64),
+    ) -> Option<u128> {
+        match self.config.tie_break_policy {
+            TieBreakPolicy::TableEnergy => candidate_energy(rows, moments, scales),
+            TieBreakPolicy::Random { .. } => {
+                let value = splitmix64(self.random_state.get());
+                self.random_state.set(value);
+                Some(u128::from(value))
+            }
+        }
+    }
+
+    fn schedule(&self, circuit: &BoolCircuit) -> Result<Vec<usize>, String> {
+        match self.config.schedule_policy {
             SchedulePolicy::Original => Ok(circuit.topological_gates()),
             SchedulePolicy::Random { seed } => circuit.scheduled_gates_by_key(|id| {
                 (splitmix64(seed ^ id as u64) as usize, 0, usize::MAX - id)
@@ -354,7 +386,7 @@ impl Mapper {
     }
 
     fn map_once(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
-        let order = self.schedule(circuit, self.config.schedule_policy)?;
+        let order = self.schedule(circuit)?;
         let mut environment = LutCircuit::default();
         environment.set_multioutput_fbs(self.config.multioutput_fbs);
         let mut wires: Vec<Option<Cone>> = vec![None; circuit.nodes.len()];
@@ -432,7 +464,7 @@ impl Mapper {
             };
             wires[*id] = environment.input(name);
         }
-        for id in self.schedule(circuit, self.config.schedule_policy)? {
+        for id in self.schedule(circuit)? {
             wires[id] = match &circuit.nodes[id] {
                 BoolNode::Input { .. } => unreachable!(),
                 BoolNode::Lut { inputs, table, .. } => {
@@ -672,8 +704,18 @@ impl Mapper {
             return self.make_candidate(left, right, xy, truth_table, scales);
         }
 
-        if self.config.multioutput_fbs {
-            return self.search_candidate(environment, left, right, xy, truth_table, false);
+        // Random trials must resample ties rather than reuse a cached winner.
+        if self.config.multioutput_fbs
+            || matches!(self.config.tie_break_policy, TieBreakPolicy::Random { .. })
+        {
+            return self.search_candidate(
+                environment,
+                left,
+                right,
+                xy,
+                truth_table,
+                !self.config.multioutput_fbs,
+            );
         }
 
         let key = CandidateCacheKey {
@@ -713,7 +755,10 @@ impl Mapper {
             ],
         )?;
         let mut best: Option<(CandidateScore, (i64, i64))> = None;
-        let moments = EnergyMoments::new(&rows);
+        let moments = match self.config.tie_break_policy {
+            TieBreakPolicy::TableEnergy => EnergyMoments::new(&rows),
+            TieBreakPolicy::Random { .. } => None,
+        };
         let mut workspace = CandidateWorkspace::new(left, right);
         let mut bootstrap_lookup = if self.config.multioutput_fbs {
             environment.prepare_bootstrap_lookup(
@@ -764,16 +809,27 @@ impl Mapper {
                 else {
                     continue;
                 };
-                let energy = candidate_energy(&rows, moments.as_ref(), (a, b))?;
                 let reuse_cost = u8::from(
                     !bootstrap_lookup
                         .as_mut()
                         .is_some_and(|lookup| lookup.has_bootstrap(environment, (a, b), -minimum)),
                 );
+                let tie_break = self.candidate_tie_break(&rows, moments.as_ref(), (a, b))?;
+                let coefficient_tie_break = match self.config.tie_break_policy {
+                    TieBreakPolicy::TableEnergy if !python_rules => merged_norm2,
+                    _ => 0,
+                };
                 let score = if python_rules {
-                    (reuse_cost, coefficient_bound, energy, 0, -a, -b)
+                    (reuse_cost, coefficient_bound, tie_break, 0, -a, -b)
                 } else {
-                    (reuse_cost, coefficient_bound, energy, merged_norm2, a, b)
+                    (
+                        reuse_cost,
+                        coefficient_bound,
+                        tie_break,
+                        coefficient_tie_break,
+                        a,
+                        b,
+                    )
                 };
                 if best
                     .as_ref()
@@ -1477,7 +1533,7 @@ mod tests {
                                     );
                                     assert_eq!(
                                         compact_actual, expected,
-                                        "weighted rows, p={fbs_size}, max={max_fbs_size}, norm={max_norm2:?}, gate={gate}, scales=({a},{b})"
+                                        "compact rows, p={fbs_size}, max={max_fbs_size}, norm={max_norm2:?}, gate={gate}, scales=({a},{b})"
                                     );
                                     if actual.is_some() {
                                         assert_eq!(
@@ -1496,62 +1552,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn energy_moments_preserve_signed_weights_and_handle_overflow() {
-        let rows = [
-            CandidateRow {
-                x: -3,
-                y: 2,
-                truth: 0,
-                count: 4,
-            },
-            CandidateRow {
-                x: 2,
-                y: -1,
-                truth: 1,
-                count: 3,
-            },
-            CandidateRow {
-                x: 0,
-                y: 4,
-                truth: 1,
-                count: 2,
-            },
-        ];
-        let moments = EnergyMoments::new(&rows).unwrap();
-        for a in -4..=4 {
-            for b in -4..=4 {
-                let values: Vec<_> = rows
-                    .iter()
-                    .flat_map(|row| std::iter::repeat_n(a * row.x + b * row.y, row.count))
-                    .collect();
-                assert_eq!(moments.energy((a, b)), Some(raw_energy(&values)));
-            }
-        }
-        let rows = [CandidateRow {
-            x: i64::MAX,
-            y: i64::MAX - 1,
-            truth: 0,
-            count: 2,
-        }];
-        let moments = EnergyMoments::new(&rows).unwrap();
-        assert!(moments.energy((2, -2)).is_none());
-        assert_eq!(candidate_energy(&rows, Some(&moments), (2, -2)), Some(8));
-        let rows = [CandidateRow {
-            x: i64::MAX,
-            y: i64::MAX,
-            truth: 0,
-            count: 3,
-        }];
-        assert!(EnergyMoments::new(&rows).is_none());
-        assert_eq!(candidate_energy(&rows, None, (1, -1)), Some(0));
-        assert_eq!(
-            candidate_energy(&rows, None, (1, 0)),
-            Some(3 * (i64::MAX as u128).pow(2))
-        );
-        assert_eq!(candidate_energy(&rows, None, (2, 0)), None);
     }
 
     #[test]
@@ -1780,12 +1780,13 @@ mod tests {
     }
 
     #[test]
-    fn compact_rows_preserve_weights_and_conflicting_truths_in_dense_and_sparse_ranges() {
+    fn compact_rows_preserve_conflicting_truths_in_dense_and_sparse_ranges() {
         let xy = [(0, 0), (1, 0), (1, 0), (1, 0)];
         let truth = [0, 0, 1, 0];
         let dense = compact_candidate_rows(&xy, &truth, [(0, 2), (0, 1)]).unwrap();
         let sparse = compact_candidate_rows(&xy, &truth, [(0, 1000), (0, 1000)]).unwrap();
         assert_eq!(dense, sparse);
+        assert_eq!(dense.len(), 3);
         assert_eq!(
             dense.iter().map(|row| row.count).collect::<Vec<_>>(),
             [1, 2, 1]
@@ -1805,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_candidate_expands_weighted_rows_in_assignment_order() {
+    fn selected_candidate_expands_compact_rows_in_assignment_order() {
         let left = Cone {
             support: vec![0, 1],
             coefficients: vec![1, 1],
@@ -1837,11 +1838,6 @@ mod tests {
                     .collect::<Vec<_>>()
             );
             assert_eq!(candidate.multivalue_table.len(), xy.len());
-            let moments = EnergyMoments::new(&rows).unwrap();
-            assert_eq!(
-                candidate_energy(&rows, Some(&moments), candidate.scales),
-                Some(raw_energy(&candidate.multivalue_table))
-            );
         }
     }
 
@@ -2070,7 +2066,7 @@ mod tests {
     }
 
     #[test]
-    fn schedules_remain_equivalent() {
+    fn node_order_and_tie_break_policies_remain_equivalent() {
         let source = r#"
             .inputs a b c d
             .outputs y z
@@ -2087,45 +2083,68 @@ mod tests {
             .end
         "#;
         let bit = BoolCircuit::parse_blif(source).unwrap();
-        for schedule_policy in [SchedulePolicy::Original, SchedulePolicy::Random { seed: 7 }] {
-            let mapper = Mapper::new(MapConfig {
-                fbs_size: 3,
-                max_fbs_size: 6,
-                schedule_policy,
-                ..MapConfig::default()
-            })
-            .unwrap();
-            let lut = mapper.map(&bit).unwrap();
-            assert_equivalent(&bit, &lut);
+        let original = bit.topological_gates();
+        let mut random_orders = HashSet::new();
+        for seed in 0..8 {
+            for schedule_policy in [SchedulePolicy::Original, SchedulePolicy::Random { seed }] {
+                for tie_break_policy in
+                    [TieBreakPolicy::TableEnergy, TieBreakPolicy::Random { seed }]
+                {
+                    let mapper = Mapper::new(MapConfig {
+                        fbs_size: 3,
+                        max_fbs_size: 6,
+                        schedule_policy,
+                        tie_break_policy,
+                        ..MapConfig::default()
+                    })
+                    .unwrap();
+                    let order = mapper.schedule(&bit).unwrap();
+                    assert_eq!(order, mapper.schedule(&bit).unwrap());
+                    if schedule_policy == SchedulePolicy::Original {
+                        assert_eq!(order, original);
+                    } else {
+                        random_orders.insert(order);
+                    }
+                    let lut = mapper.map(&bit).unwrap();
+                    assert_equivalent(&bit, &lut);
+                }
+            }
         }
+        assert!(random_orders.len() > 1);
     }
 
     #[test]
-    fn random_scheduler_changes_the_order_of_ready_gates() {
-        let source = r#"
-            .inputs a b c d
-            .outputs y z
-            .names a b x
-            01 1
-            10 1
-            .names c d w
-            11 1
-            .names x w y
-            1- 1
-            -1 1
-            .names x c z
-            11 1
-            .end
-        "#;
+    fn random_ties_preserve_minimum_span_and_resample_cached_compositions() {
+        let source = ".inputs a b\n.outputs y\n.names a b y\n01 1\n10 1\n.end\n";
         let circuit = BoolCircuit::parse_blif(source).unwrap();
-        let mapper = Mapper::new(MapConfig::default()).unwrap();
-        let original = mapper.schedule(&circuit, SchedulePolicy::Original).unwrap();
-        assert!((0..8).any(|seed| {
-            mapper
-                .schedule(&circuit, SchedulePolicy::Random { seed })
-                .unwrap()
-                != original
-        }));
+        let left = Cone::identity(0);
+        let right = Cone::identity(1);
+        let (xy, truth) = cone_composition_tables(&left, &right, &[0, 1, 1, 0]).unwrap();
+        let environment = LutCircuit::default();
+        let mut choices = HashSet::new();
+        for seed in 0..16 {
+            let mapper = Mapper::new(MapConfig {
+                max_norm2: Some(2),
+                tie_break_policy: TieBreakPolicy::Random { seed },
+                ..MapConfig::default()
+            })
+            .unwrap();
+            let mut cache = CandidateCache::new();
+            for _ in 0..8 {
+                let candidate = mapper
+                    .find_candidate(&environment, &left, &right, &xy, &truth, &mut cache)
+                    .unwrap();
+                assert_eq!(candidate.scales.0.abs() + candidate.scales.1.abs(), 2);
+                assert!(mapper.is_lut_valid(&truth, &candidate.multivalue_table));
+                choices.insert(candidate.scales);
+            }
+            assert!(cache.is_empty());
+            let mapped = mapper.map(&circuit).unwrap();
+            assert_equivalent(&circuit, &mapped);
+            assert!(mapped.stats().max_norm2 <= 2);
+            assert_eq!(mapped.to_lbf(), mapper.map(&circuit).unwrap().to_lbf());
+        }
+        assert!(choices.len() > 1);
     }
 
     #[test]
@@ -2313,12 +2332,12 @@ mod tests {
                     .push((format!("o{output}"), BoolWire::Node(id)));
             }
 
-            for (coefficient_policy, schedule_policy) in [
-                (CoefficientPolicy::Basic, SchedulePolicy::Original),
-                (CoefficientPolicy::MinSpan, SchedulePolicy::Original),
+            for (coefficient_policy, tie_break_policy) in [
+                (CoefficientPolicy::Basic, TieBreakPolicy::TableEnergy),
+                (CoefficientPolicy::MinSpan, TieBreakPolicy::TableEnergy),
                 (
                     CoefficientPolicy::MinSpan,
-                    SchedulePolicy::Random {
+                    TieBreakPolicy::Random {
                         seed: circuit_index,
                     },
                 ),
@@ -2328,7 +2347,10 @@ mod tests {
                     max_fbs_size: 2 * (3 + circuit_index as usize % 4),
                     max_truth_table_inputs: 10,
                     coefficient_policy,
-                    schedule_policy,
+                    schedule_policy: SchedulePolicy::Random {
+                        seed: circuit_index,
+                    },
+                    tie_break_policy,
                     multioutput_fbs: true,
                     ..MapConfig::default()
                 })

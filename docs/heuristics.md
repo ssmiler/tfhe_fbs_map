@@ -30,11 +30,12 @@ and `s2`, the inclusive integer coefficient ranges are `a` in `[-s2, s2]` and
 `[-s1, s1]`. It minimizes the span bound
 `|a|*(s1 - 1) + |b|*(s2 - 1)`, then the squared Euclidean norm of the
 multivalue table: `sum_j(mvt[j]^2)`, including repeated table entries. Equal
-scores prefer descending coefficient pairs. The coefficient norm
-`sum_i(c_i²)` is used separately to order input cones and enforce
-`--max-norm2`; it does not break ordinary search ties. Cache keys retain the
-exact input tables and truth table so symmetry sharing cannot alter these tie
-choices.
+scores prefer descending coefficient pairs. With `--random-tie-breaking`,
+the table-energy tie-breaker is replaced by a seeded random priority among
+valid candidates with the same span bound, in every trial. The coefficient-norm
+limit still applies. Table-energy mode caches coefficient choices using exact
+input tables and truth tables; random tie-breaking bypasses this cache so
+repeated compositions can resample ties.
 
 Ordinary linear operations preserve term order and repeated terms when
 flattening. Canonical sorting and coefficient aggregation are retained in
@@ -58,9 +59,16 @@ to `p`. `--max-tt-size` bounds cone support before forced bootstrapping, and
 normally uses four-entry binary LUTs and does not apply the composition-size
 or cone-support limits; its norm limit is checked on the mapped linear forms.
 
-`--trials N` runs the selected policy once in the circuit's encoded topological
-order, then in `N - 1` deterministic random topological orders derived from
-`--seed`. The best mapping is retained by bootstrap count, then maximum LUT
+`--trials N` uses the same selected modes in every trial, including the first.
+Node order defaults to the circuit's encoded topological order;
+`--random-node-order` selects a random topological order instead. Search defaults
+to table-energy tie-breaking; `--random-tie-breaking` selects random ties
+instead. The flags are independent. Random choices use seeds `seed`,
+`seed + 1`, etc., starting from `--seed`; repeating the same command reproduces
+the same choices. Without either flag, extra trials repeat the same mapping.
+Random node order applies to all mappers, while random coefficient tie-breaking
+affects only `search`.
+The best mapping is retained by bootstrap count, then maximum LUT
 size, maximum reported norm², and linear-operation count. Reported mapping time
 is summed over all trials and excludes parsing, verification, and file output.
 
@@ -72,8 +80,9 @@ compatible with existing bootstrap inputs, and cones can be realigned to such
 encodings before bootstrapping. These zero-additional-FBS choices describe the
 mapper's counting model, not a guarantee of zero encrypted-evaluation cost.
 Among candidates with the same reuse cost, search minimizes the span bound,
-then the squared multivalue-table norm, then the squared coefficient norm;
-remaining ties prefer ascending coefficient pairs.
+then the squared multivalue-table norm and squared coefficient norm by default,
+or a random priority with `--random-tie-breaking`. Remaining ties prefer
+ascending coefficient pairs.
 
 In `naive` and `search`, multi-output mode defers eager circuit-output
 bootstraps. Shared cones remain available until composition requires a

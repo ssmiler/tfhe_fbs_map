@@ -1,5 +1,7 @@
 #! /bin/bash
 
+source "$(dirname -- "${BASH_SOURCE[0]}")/benchmark_config.sh" || exit 1
+
 # generate benchmarks
 [ -d benchmarks/generated ] || ( echo "Generating benchmarks" && mkdir -p benchmarks/generated && python3 generate_benchmarks.py --prefix benchmarks/generated ) || exit
 
@@ -39,7 +41,7 @@ function run_bench() {
     ALL+=" ${OUT_LBF}"
 
     echo "$OUT $OUT_LBF $LOG: $BLIF | $OUTPUT_DIR"
-    echo -e "\t$FBS_MAP $BLIF --fbs-size $FBS_SIZE --mapper $MAPPER --output $OUT --output-lbf ${OUT_LBF} > $LOG 2>&1"
+    echo -e "\t$FBS_MAP $BLIF --fbs-size $FBS_SIZE --mapper $MAPPER $MAPPER_FLAGS --output $OUT --output-lbf ${OUT_LBF} > $LOG 2>&1"
     echo ""
 }
 

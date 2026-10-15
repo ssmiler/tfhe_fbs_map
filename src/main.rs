@@ -4,7 +4,7 @@ pub mod mapper;
 
 use circuit::{BoolCircuit, BoolNode};
 use lut::LutCircuit;
-use mapper::{CoefficientPolicy, MapConfig, Mapper, SchedulePolicy};
+use mapper::{CoefficientPolicy, MapConfig, Mapper, SchedulePolicy, TieBreakPolicy};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -22,6 +22,8 @@ struct Arguments {
     max_tt_size: usize,
     max_norm2: Option<u128>,
     trials: usize,
+    random_node_order: bool,
+    random_tie_breaking: bool,
     seed: u64,
     verify_samples: usize,
     multioutput_fbs: bool,
@@ -63,14 +65,22 @@ fn run() -> Result<(), String> {
         max_norm2: arguments.max_norm2,
         coefficient_policy,
         schedule_policy: SchedulePolicy::Original,
+        tie_break_policy: TieBreakPolicy::TableEnergy,
         multioutput_fbs: arguments.multioutput_fbs,
     };
 
     let mut best = None;
     let mut total_duration = 0.0;
     for trial in 0..arguments.trials {
+        let (schedule_policy, tie_break_policy) = trial_policies(
+            trial,
+            arguments.seed,
+            arguments.random_node_order,
+            arguments.random_tie_breaking,
+        );
         let mapper = Mapper::new(MapConfig {
-            schedule_policy: trial_schedule(trial, arguments.seed),
+            schedule_policy,
+            tie_break_policy,
             ..base_config.clone()
         })?;
         let start = Instant::now();
@@ -104,7 +114,8 @@ fn run() -> Result<(), String> {
         "{{'nb_inp': {}, 'nb_linprod': {}, 'nb_bootstrap': {}, 'max_lut_size': {}, \
          'norm2_linprod': {}, 'nb_out': {}, 'filename': '{}', 'fbs_size': {}, \
          'mapper': '{}', 'multioutput_fbs': {}, 'strict_fbs_size': {}, 'max_tt_size': {}, 'max_fbs_size': {}, \
-         'max_norm2': {}, 'trials': {}, 'time': {:.9}}}",
+         'max_norm2': {}, 'trials': {}, 'random_node_order': {}, \
+         'random_tie_breaking': {}, 'time': {:.9}}}",
         stats.input_count,
         stats.linear_count,
         stats.bootstrap_count,
@@ -123,6 +134,8 @@ fn run() -> Result<(), String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "None".to_owned()),
         arguments.trials,
+        python_bool(arguments.random_node_order),
+        python_bool(arguments.random_tie_breaking),
         total_duration,
     );
     Ok(())
@@ -149,14 +162,24 @@ fn parse_file(path: impl AsRef<Path>, input_type: &str) -> Result<BoolCircuit, S
     circuit.map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn trial_schedule(trial: usize, seed: u64) -> SchedulePolicy {
-    if trial == 0 {
-        SchedulePolicy::Original
+fn trial_policies(
+    trial: usize,
+    seed: u64,
+    random_node_order: bool,
+    random_tie_breaking: bool,
+) -> (SchedulePolicy, TieBreakPolicy) {
+    let seed = seed.wrapping_add(trial as u64);
+    let schedule = if random_node_order {
+        SchedulePolicy::Random { seed }
     } else {
-        SchedulePolicy::Random {
-            seed: seed.wrapping_add((trial - 1) as u64),
-        }
-    }
+        SchedulePolicy::Original
+    };
+    let tie_break = if random_tie_breaking {
+        TieBreakPolicy::Random { seed }
+    } else {
+        TieBreakPolicy::TableEnergy
+    };
+    (schedule, tie_break)
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
@@ -169,6 +192,8 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut max_tt_size = 16usize;
     let mut max_norm2 = None;
     let mut trials = 1usize;
+    let mut random_node_order = false;
+    let mut random_tie_breaking = false;
     let mut seed = 42u64;
     let mut verify_samples = 1000usize;
     let mut multioutput_fbs = false;
@@ -191,6 +216,8 @@ fn parse_arguments() -> Result<Arguments, String> {
                 max_norm2 = Some(parse_value(&mut arguments, &argument)?)
             }
             "--trials" => trials = parse_value(&mut arguments, &argument)?,
+            "--random-node-order" => random_node_order = true,
+            "--random-tie-breaking" => random_tie_breaking = true,
             "--seed" => seed = parse_value(&mut arguments, &argument)?,
             "--verify-samples" => verify_samples = parse_value(&mut arguments, &argument)?,
             "--multioutput-fbs" | "--multioutput_fbs" => multioutput_fbs = true,
@@ -228,6 +255,8 @@ fn parse_arguments() -> Result<Arguments, String> {
         max_tt_size,
         max_norm2,
         trials,
+        random_node_order,
+        random_tie_breaking,
         seed,
         verify_samples,
         multioutput_fbs,
@@ -268,8 +297,10 @@ Options:
   --strict-fbs-size        Disable the negacyclic extension from p to 2p
   --max-tt-size <N>        Maximum cone support before forced bootstrap (default: 16)
   --max-norm2 <N>          Maximum sum of squared linear-combination coefficients
-  --trials <N>             Original order once, then N-1 random orders (default: 1)
-  --seed <N>               Random-order and verification seed (default: 42)
+  --trials <N>             Trials using the selected order and tie-breaking (default: 1)
+  --random-node-order     Randomize topological node order (default: input order)
+  --random-tie-breaking   Search: random ties instead of MVT energy (default: off)
+  --seed <N>               Random-order, tie-breaking, and verification seed (default: 42)
   --verify-samples <N>     Random equivalence samples above 16 inputs (default: 1000)
   --multioutput-fbs        Group bootstrap outputs with the same linear input
   --output <FILE>          Write the human-readable FBS circuit
@@ -344,9 +375,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trials_use_original_then_distinct_random_seeds() {
-        assert_eq!(trial_schedule(0, 42), SchedulePolicy::Original);
-        assert_eq!(trial_schedule(1, 42), SchedulePolicy::Random { seed: 42 });
-        assert_eq!(trial_schedule(2, 42), SchedulePolicy::Random { seed: 43 });
+    fn trials_use_the_same_selected_modes_with_distinct_random_seeds() {
+        for trial in 0..3 {
+            for random_order in [false, true] {
+                for random_ties in [false, true] {
+                    let (order, ties) = trial_policies(trial, 42, random_order, random_ties);
+                    let seed = 42 + trial as u64;
+                    assert_eq!(
+                        order,
+                        if random_order {
+                            SchedulePolicy::Random { seed }
+                        } else {
+                            SchedulePolicy::Original
+                        }
+                    );
+                    assert_eq!(
+                        ties,
+                        if random_ties {
+                            TieBreakPolicy::Random { seed }
+                        } else {
+                            TieBreakPolicy::TableEnergy
+                        }
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            trial_policies(1, u64::MAX, true, true),
+            (
+                SchedulePolicy::Random { seed: 0 },
+                TieBreakPolicy::Random { seed: 0 }
+            )
+        );
     }
 }

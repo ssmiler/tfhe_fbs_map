@@ -1,5 +1,7 @@
 NB_J=12
 
+source "$(dirname -- "${BASH_SOURCE[0]}")/benchmark_config.sh" || exit 1
+
 OUT_DIR=outputs
 
 cargo build --release --manifest-path ../Cargo.toml || exit

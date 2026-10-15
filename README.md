@@ -40,10 +40,14 @@ up to `2p` entries; `--strict-fbs-size` limits them to `p`. The `basic` policy
 uses per-gate LUTs and does not enforce these composition-size limits. Run
 `target/release/fbs-map --help` for all controls.
 
-`--trials N` runs the selected mapper first with the topological order encoded
-in the circuit, then with `N - 1` deterministic random topological orders
-derived from `--seed`. The best mapping is retained and total mapping time is
-reported.
+`--trials N` runs the selected modes in every trial. By default, nodes follow the input circuit's encoded
+topological order and `search` breaks equal-span ties by MVT energy (the sum of
+squared multivalue-table entries). Use `--random-node-order` to randomize the
+topological order and `--random-tie-breaking` to randomize search ties instead
+of using MVT energy. The flags are independent and apply from the first trial.
+Random trials use reproducible seeds `seed`, `seed + 1`, etc., starting from
+`--seed`. Without either flag, extra trials repeat the same mapping. The best
+mapping is retained and total mapping time is reported.
 
 > [!NOTE]
 > Multi-output FBS support, inspired by [CIM19](https://eprint.iacr.org/2018/622), is experimental.
@@ -112,6 +116,18 @@ copy their lowest-cost `search` mappings into `best/`:
 ```bash
 bash run_benchmarks.sh
 ```
+
+Set `NB_TRIALS` to a positive integer to control mapper trials (default: `1`).
+Set `RANDOM_NODE_ORDER=1` and/or `RANDOM_TIE_BREAKING=1` to enable the
+corresponding mapper flags; both default to `0` (off):
+
+```bash
+NB_TRIALS=10 RANDOM_NODE_ORDER=1 RANDOM_TIE_BREAKING=1 bash run_benchmarks.sh
+```
+
+The runner and all makefile generators load these settings from
+`experiments/benchmark_config.sh`, including when generators are run separately.
+Changing them does not force existing, up-to-date mapping targets to be rebuilt.
 
 The script creates a `Makefile` for each benchmark suite (`epfl`, `iscas85`, etc.).
 The makefile targets run the Rust mapper with specific parameters.
