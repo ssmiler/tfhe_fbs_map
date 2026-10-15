@@ -7,7 +7,7 @@ BENCHES=$(ls benchmarks/generated/*.blif)
 
 FBS_SIZES=$(seq 2 16)
 
-MAP_CIRCUIT_PY="../fbs_mapper/map_circuit.py"
+FBS_MAP="../target/release/fbs-map"
 
 OUTPUT_DIR=outputs/generated
 
@@ -39,7 +39,7 @@ function run_bench() {
     ALL+=" ${OUT_LBF}"
 
     echo "$OUT $OUT_LBF $LOG: $BLIF | $OUTPUT_DIR"
-    echo -e "\tpython3 $MAP_CIRCUIT_PY $BLIF --fbs_size $FBS_SIZE --mapper $MAPPER --output $OUT --output_lbf ${OUT_LBF} > $LOG 2>&1"
+    echo -e "\t$FBS_MAP $BLIF --fbs-size $FBS_SIZE --mapper $MAPPER --output $OUT --output-lbf ${OUT_LBF} > $LOG 2>&1"
     echo ""
 }
 
