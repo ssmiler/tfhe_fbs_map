@@ -25,6 +25,7 @@ struct Arguments {
     seed: u64,
     verify_samples: usize,
     multioutput_fbs: bool,
+    verbosity: usize,
     output: Option<PathBuf>,
     output_lbf: Option<PathBuf>,
 }
@@ -64,21 +65,39 @@ fn run() -> Result<(), String> {
         coefficient_policy,
         schedule_policy: SchedulePolicy::Original,
         multioutput_fbs: arguments.multioutput_fbs,
+        log_decisions: arguments.verbosity >= 3,
     };
 
     let mut best = None;
     let mut total_duration = 0.0;
     for trial in 0..arguments.trials {
+        let schedule_policy = trial_schedule(trial, arguments.seed);
+        if base_config.log_decisions {
+            eprintln!(
+                "INFO mapper: trial {}/{} schedule={schedule_policy:?}",
+                trial + 1,
+                arguments.trials
+            );
+        }
         let mapper = Mapper::new(MapConfig {
-            schedule_policy: trial_schedule(trial, arguments.seed),
+            schedule_policy,
             ..base_config.clone()
         })?;
         let start = Instant::now();
         let mapped = mapper.map(&bit_circuit)?;
         total_duration += start.elapsed().as_secs_f64();
-        if best.as_ref().is_none_or(|current: &LutCircuit| {
+        let replace_best = best.as_ref().is_none_or(|current: &LutCircuit| {
             mapped.stats().quality_key() < current.stats().quality_key()
-        }) {
+        });
+        if base_config.log_decisions {
+            eprintln!(
+                "INFO mapper: trial {}/{} result={:?} selected={replace_best}",
+                trial + 1,
+                arguments.trials,
+                mapped.stats()
+            );
+        }
+        if replace_best {
             best = Some(mapped);
         }
     }
@@ -160,7 +179,10 @@ fn trial_schedule(trial: usize, seed: u64) -> SchedulePolicy {
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
-    let mut arguments = env::args().skip(1);
+    parse_arguments_from(env::args().skip(1))
+}
+
+fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, String> {
     let mut filename = None;
     let mut mapper = "search".to_owned();
     let mut input_type = "auto".to_owned();
@@ -172,6 +194,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut seed = 42u64;
     let mut verify_samples = 1000usize;
     let mut multioutput_fbs = false;
+    let mut verbosity = 0usize;
     let mut output = None;
     let mut output_lbf = None;
 
@@ -194,6 +217,14 @@ fn parse_arguments() -> Result<Arguments, String> {
             "--seed" => seed = parse_value(&mut arguments, &argument)?,
             "--verify-samples" => verify_samples = parse_value(&mut arguments, &argument)?,
             "--multioutput-fbs" | "--multioutput_fbs" => multioutput_fbs = true,
+            "-v" | "--verbose" => verbosity += 1,
+            value
+                if value.len() > 2
+                    && value.starts_with('-')
+                    && value[1..].chars().all(|character| character == 'v') =>
+            {
+                verbosity += value.len() - 1;
+            }
             "--output" => output = Some(PathBuf::from(next_value(&mut arguments, "--output")?)),
             "--output-lbf" | "--output_lbf" => {
                 output_lbf = Some(PathBuf::from(next_value(&mut arguments, &argument)?));
@@ -231,6 +262,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         seed,
         verify_samples,
         multioutput_fbs,
+        verbosity,
         output,
         output_lbf,
     })
@@ -272,6 +304,7 @@ Options:
   --seed <N>               Random-order and verification seed (default: 42)
   --verify-samples <N>     Random equivalence samples above 16 inputs (default: 1000)
   --multioutput-fbs        Group bootstrap outputs with the same linear input
+  -v, --verbose            Increase verbosity; repeat three times for decision logs
   --output <FILE>          Write the human-readable FBS circuit
   --output-lbf <FILE>      Write an LBF circuit
   -h, --help               Show this help
@@ -348,5 +381,20 @@ mod tests {
         assert_eq!(trial_schedule(0, 42), SchedulePolicy::Original);
         assert_eq!(trial_schedule(1, 42), SchedulePolicy::Random { seed: 42 });
         assert_eq!(trial_schedule(2, 42), SchedulePolicy::Random { seed: 43 });
+    }
+
+    #[test]
+    fn verbose_flags_reach_the_python_information_level() {
+        let compact =
+            parse_arguments_from(["-vvv", "circuit.blif"].into_iter().map(str::to_owned)).unwrap();
+        assert_eq!(compact.verbosity, 3);
+
+        let repeated = parse_arguments_from(
+            ["--verbose", "-v", "--verbose", "circuit.blif"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(repeated.verbosity, 3);
     }
 }

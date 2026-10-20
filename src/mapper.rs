@@ -1,6 +1,7 @@
 use crate::circuit::{BoolCircuit, BoolNode, BoolWire};
 use crate::lut::{LutCircuit, LutSignal};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CoefficientPolicy {
@@ -24,6 +25,7 @@ pub struct MapConfig {
     pub coefficient_policy: CoefficientPolicy,
     pub schedule_policy: SchedulePolicy,
     pub multioutput_fbs: bool,
+    pub log_decisions: bool,
 }
 
 impl Default for MapConfig {
@@ -36,6 +38,7 @@ impl Default for MapConfig {
             coefficient_policy: CoefficientPolicy::MinSpan,
             schedule_policy: SchedulePolicy::Original,
             multioutput_fbs: false,
+            log_decisions: false,
         }
     }
 }
@@ -322,6 +325,42 @@ impl Mapper {
         Ok(Self { config })
     }
 
+    fn info(&self, arguments: fmt::Arguments<'_>) {
+        if self.config.log_decisions {
+            eprintln!("INFO mapper: {arguments}");
+        }
+    }
+
+    fn info_cone(&self, label: fmt::Arguments<'_>, cone: &Cone) {
+        if !self.config.log_decisions {
+            return;
+        }
+        eprintln!(
+            "INFO mapper: {label}: support={:?} coefficients={:?} tt={:?} mvt={:?} span={} norm2={}",
+            cone.support,
+            cone.coefficients,
+            cone.truth_table,
+            cone.multivalue_table,
+            cone.span(),
+            cone.norm2()
+        );
+    }
+
+    fn info_candidate(&self, attempt: usize, candidate: Option<&Candidate>, truth_table: &[u8]) {
+        if !self.config.log_decisions {
+            return;
+        }
+        match candidate {
+            Some(candidate) => self.info(format_args!(
+                "candidate attempt={attempt} scales={:?} tt={truth_table:?} mvt={:?}",
+                candidate.scales, candidate.multivalue_table
+            )),
+            None => self.info(format_args!(
+                "candidate attempt={attempt} scales=None tt={truth_table:?}"
+            )),
+        }
+    }
+
     pub fn map(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
         if self.config.coefficient_policy == CoefficientPolicy::Basic {
             let mapped = self.map_basic(circuit)?;
@@ -377,7 +416,12 @@ impl Mapper {
         }
 
         for gate_id in order {
-            let BoolNode::Lut { inputs, table, .. } = &circuit.nodes[gate_id] else {
+            let BoolNode::Lut {
+                name,
+                inputs,
+                table,
+            } = &circuit.nodes[gate_id]
+            else {
                 unreachable!()
             };
             let mut input_cones = Vec::with_capacity(inputs.len());
@@ -390,17 +434,38 @@ impl Mapper {
                 });
             }
 
+            if self.config.log_decisions {
+                let input_names: Vec<_> = inputs
+                    .iter()
+                    .map(|input| bool_wire_name(circuit, *input))
+                    .collect();
+                self.info(format_args!(
+                    "gate id={gate_id} name={name} inputs={input_names:?} table={table:?}"
+                ));
+                for (position, cone) in input_cones.iter().enumerate() {
+                    self.info_cone(format_args!("gate {name} input[{position}]"), cone);
+                }
+            }
+
             let (cone, updates) =
                 self.map_gate(&mut environment, input_cones, table, &mut candidate_cache)?;
+            self.info_cone(format_args!("gate {name} result"), &cone);
             for (position, replacement) in updates.into_iter().enumerate() {
                 if let Some(replacement) = replacement
                     && let BoolWire::Node(id) = inputs[position]
                 {
+                    self.info_cone(
+                        format_args!("gate {name} updates input {}", circuit.nodes[id].name()),
+                        &replacement,
+                    );
                     wires[id] = Some(replacement);
                 }
             }
 
             let cone = if !self.config.multioutput_fbs && forced_outputs[gate_id] {
+                self.info(format_args!(
+                    "bootstrap reason=forced-output gate={name} position={gate_id}"
+                ));
                 self.bootstrap_cone(&mut environment, cone)?
             } else {
                 cone
@@ -415,7 +480,13 @@ impl Mapper {
                     .clone()
                     .ok_or_else(|| format!("output '{name}' was not mapped"))?,
             };
+            self.info(format_args!(
+                "output name={name} source={}",
+                bool_wire_name(circuit, *output)
+            ));
+            self.info_cone(format_args!("output {name} cone"), &cone);
             let signal = self.output_signal(&mut environment, cone)?;
+            self.info(format_args!("output name={name} signal={signal:?}"));
             environment.add_output(name.clone(), signal);
         }
         environment.prune();
@@ -433,6 +504,21 @@ impl Mapper {
             wires[*id] = environment.input(name);
         }
         for id in self.schedule(circuit, self.config.schedule_policy)? {
+            if let BoolNode::Lut {
+                name,
+                inputs,
+                table,
+            } = &circuit.nodes[id]
+                && self.config.log_decisions
+            {
+                let input_names: Vec<_> = inputs
+                    .iter()
+                    .map(|input| bool_wire_name(circuit, *input))
+                    .collect();
+                self.info(format_args!(
+                    "basic gate id={id} name={name} inputs={input_names:?} table={table:?}"
+                ));
+            }
             wires[id] = match &circuit.nodes[id] {
                 BoolNode::Input { .. } => unreachable!(),
                 BoolNode::Lut { inputs, table, .. } => {
@@ -504,12 +590,21 @@ impl Mapper {
                     }
                 }
             };
+            self.info(format_args!(
+                "basic gate id={id} name={} signal={:?}",
+                circuit.nodes[id].name(),
+                wires[id]
+            ));
         }
         for (name, output) in &circuit.outputs {
             let signal = match output {
                 BoolWire::Const(value) => LutSignal::Const(i64::from(*value)),
                 BoolWire::Node(id) => wires[*id],
             };
+            self.info(format_args!(
+                "output name={name} source={} signal={signal:?}",
+                bool_wire_name(circuit, *output)
+            ));
             environment.add_output(name.clone(), signal);
         }
         environment.prune();
@@ -580,11 +675,18 @@ impl Mapper {
                 &mut right_position,
                 &mut gate_table,
             );
+            self.info(format_args!(
+                "switch binary inputs left_position={left_position} right_position={right_position} table={gate_table:?}"
+            ));
         }
         let mut updates = [None, None];
 
         let support_size = union_support_size(&left.support, &right.support);
         if support_size > self.config.max_truth_table_inputs {
+            self.info(format_args!(
+                "bootstrap reason=support-limit input_position={left_position} support_size={support_size} limit={}",
+                self.config.max_truth_table_inputs
+            ));
             left = self.bootstrap_cone(environment, left)?;
             updates[left_position] = Some(left.clone());
             switch_inputs(
@@ -597,6 +699,11 @@ impl Mapper {
             if union_support_size(&left.support, &right.support)
                 > self.config.max_truth_table_inputs
             {
+                self.info(format_args!(
+                    "bootstrap reason=support-limit input_position={left_position} support_size={} limit={}",
+                    union_support_size(&left.support, &right.support),
+                    self.config.max_truth_table_inputs
+                ));
                 left = self.bootstrap_cone(environment, left)?;
                 updates[left_position] = Some(left.clone());
             }
@@ -604,56 +711,78 @@ impl Mapper {
 
         let (xy, truth_table) = cone_composition_tables(&left, &right, &gate_table)?;
         if all_equal(&truth_table) {
+            self.info(format_args!(
+                "candidate attempt=1 constant={}",
+                truth_table[0]
+            ));
             return Ok((Cone::constant(truth_table[0]), updates));
         }
-        if let Some(candidate) = self.find_candidate(
+        let candidate = self.find_candidate(
             environment,
             &left,
             &right,
             &xy,
             &truth_table,
             candidate_cache,
-        ) {
+        );
+        self.info_candidate(1, candidate.as_ref(), &truth_table);
+        if let Some(candidate) = candidate {
             let cone = self.merge_cones(left, right, candidate, truth_table)?;
             return Ok((cone, updates));
         }
 
+        self.info(format_args!(
+            "bootstrap reason=no-valid-candidate attempt=1 input_position={left_position}"
+        ));
         left = self.bootstrap_cone(environment, left)?;
         updates[left_position] = Some(left.clone());
         let (xy, truth_table) = cone_composition_tables(&left, &right, &gate_table)?;
         if all_equal(&truth_table) {
+            self.info(format_args!(
+                "candidate attempt=2 constant={}",
+                truth_table[0]
+            ));
             return Ok((Cone::constant(truth_table[0]), updates));
         }
-        if let Some(candidate) = self.find_candidate(
+        let candidate = self.find_candidate(
             environment,
             &left,
             &right,
             &xy,
             &truth_table,
             candidate_cache,
-        ) {
+        );
+        self.info_candidate(2, candidate.as_ref(), &truth_table);
+        if let Some(candidate) = candidate {
             let cone = self.merge_cones(left, right, candidate, truth_table)?;
             return Ok((cone, updates));
         }
 
+        self.info(format_args!(
+            "bootstrap reason=no-valid-candidate attempt=2 input_position={right_position}"
+        ));
         right = self.bootstrap_cone(environment, right)?;
         updates[right_position] = Some(right.clone());
         let (xy, truth_table) = cone_composition_tables(&left, &right, &gate_table)?;
         if all_equal(&truth_table) {
+            self.info(format_args!(
+                "candidate attempt=3 constant={}",
+                truth_table[0]
+            ));
             return Ok((Cone::constant(truth_table[0]), updates));
         }
-        let candidate = self
-            .find_candidate(
-                environment,
-                &left,
-                &right,
-                &xy,
-                &truth_table,
-                candidate_cache,
-            )
-            .ok_or_else(|| {
-                "no valid composition after bootstrapping both inputs as needed".to_owned()
-            })?;
+        let candidate = self.find_candidate(
+            environment,
+            &left,
+            &right,
+            &xy,
+            &truth_table,
+            candidate_cache,
+        );
+        self.info_candidate(3, candidate.as_ref(), &truth_table);
+        let candidate = candidate.ok_or_else(|| {
+            "no valid composition after bootstrapping both inputs as needed".to_owned()
+        })?;
         let cone = self.merge_cones(left, right, candidate, truth_table)?;
         Ok((cone, updates))
     }
@@ -866,9 +995,14 @@ impl Mapper {
 
     fn bootstrap_cone(&self, environment: &mut LutCircuit, mut cone: Cone) -> Result<Cone, String> {
         if cone.support.len() <= 1 {
+            self.info_cone(format_args!("bootstrap skipped"), &cone);
             return Ok(cone);
         }
+        self.info_cone(format_args!("bootstrap input"), &cone);
         if let Some(coefficients) = self.reusable_cone_coefficients(environment, &cone) {
+            self.info(format_args!(
+                "bootstrap realign coefficients={coefficients:?}"
+            ));
             cone.multivalue_table = linear_table(&coefficients);
             cone.coefficients = coefficients;
             self.validate_cone(&cone)?;
@@ -885,9 +1019,13 @@ impl Mapper {
             .collect();
         let linear = environment.linear(&terms, -minimum);
         let table = self.bootstrap_table(&cone.truth_table, &cone.multivalue_table)?;
+        self.info(format_args!(
+            "bootstrap materialize linear={linear:?} table={table:?}"
+        ));
         let LutSignal::Node(node) = environment.bootstrap(linear, table)? else {
             return Err("non-constant cone unexpectedly bootstrapped to a constant".to_owned());
         };
+        self.info(format_args!("bootstrap result node={node}"));
         Ok(Cone::identity(node))
     }
 
@@ -901,6 +1039,7 @@ impl Mapper {
                 table => Err(format!("unexpected one-input output table {table:?}")),
             },
             _ => {
+                self.info(format_args!("bootstrap reason=output-materialization"));
                 let bootstrapped = self.bootstrap_cone(environment, cone)?;
                 self.output_signal(environment, bootstrapped)
             }
@@ -1056,6 +1195,13 @@ impl Mapper {
         left.iter().zip(right).all(|(x, y)| x != y)
             || (left.iter().all(|x| *x == 0) && right.iter().all(|x| *x == 0))
             || (left.iter().all(|x| *x == 1) && right.iter().all(|x| *x == 1))
+    }
+}
+
+fn bool_wire_name(circuit: &BoolCircuit, wire: BoolWire) -> String {
+    match wire {
+        BoolWire::Const(value) => u8::from(value).to_string(),
+        BoolWire::Node(id) => circuit.nodes[id].name().to_owned(),
     }
 }
 
