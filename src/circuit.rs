@@ -391,11 +391,14 @@ impl BoolCircuit {
         self.gate_ids().collect()
     }
 
-    /// Topologically schedule LUTs, preferring the largest ready-node key.
-    pub fn scheduled_gates_by_key<F>(&self, mut key: F) -> Result<Vec<usize>, String>
+    /// Schedule LUTs by key within the earliest `window` ready nodes in input order.
+    pub fn scheduled_gates_by_key<F>(&self, window: usize, mut key: F) -> Result<Vec<usize>, String>
     where
         F: FnMut(usize) -> (usize, usize, usize),
     {
+        if window == 0 {
+            return Err("scheduling window must be positive".to_owned());
+        }
         let mut indegree = vec![0usize; self.nodes.len()];
         let mut successors = vec![Vec::new(); self.nodes.len()];
         for (id, node) in self.nodes.iter().enumerate() {
@@ -412,10 +415,15 @@ impl BoolCircuit {
             }
         }
         let mut ready: Vec<usize> = self.gate_ids().filter(|id| indegree[*id] == 0).collect();
-        let mut order = Vec::with_capacity(self.gate_ids().count());
+        let mut order: Vec<usize> = Vec::with_capacity(self.gate_ids().count());
         while !ready.is_empty() {
+            let count = window.min(ready.len());
+            if count < ready.len() {
+                ready.select_nth_unstable(count);
+            }
             let (position, _) = ready
                 .iter()
+                .take(count)
                 .enumerate()
                 .max_by_key(|(_, id)| key(**id))
                 .unwrap();
@@ -887,6 +895,38 @@ mod tests {
             circuit.evaluate(&HashMap::new()).unwrap(),
             vec![("zero".to_owned(), false), ("one".to_owned(), true)]
         );
+    }
+
+    #[test]
+    fn scheduler_respects_priorities_and_dependencies() {
+        let source = ".inputs a b c d\n.outputs y\n\
+            .names a b first\n11 1\n\
+            .names a b sibling\n01 1\n\
+            .names c d unrelated\n11 1\n\
+            .names sibling unrelated y\n11 1\n";
+        let circuit = BoolCircuit::parse_blif(source).unwrap();
+        let original = circuit.topological_gates();
+        let order = circuit
+            .scheduled_gates_by_key(8, |id| {
+                let priority = match circuit.nodes[id].name() {
+                    "first" => 100,
+                    "sibling" => 1,
+                    _ => 90,
+                };
+                (priority, 0, id)
+            })
+            .unwrap();
+        assert_eq!(order[0], original[0]);
+        assert_eq!(order[1], original[2]);
+        let mut remaining = original;
+        for id in order {
+            assert!(circuit.nodes[id].inputs().iter().all(|input| match input {
+                BoolWire::Node(input) => !remaining.contains(input),
+                BoolWire::Const(_) => true,
+            }));
+            remaining.retain(|node| *node != id);
+        }
+        assert!(remaining.is_empty());
     }
 
     #[test]

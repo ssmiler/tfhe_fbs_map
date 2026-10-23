@@ -44,6 +44,8 @@ The mapper runs once with the topological order encoded in the circuit.
 `--trials N` adds `N` deterministic random topological orders derived from
 `--seed`; `--exclude-input-order` skips the input-order run. The best mapping is
 retained and total mapping time is reported.
+Random scheduling chooses among the eight earliest ready gates in input order
+to preserve locality while exploring different topological orders.
 
 > [!NOTE]
 > Multi-output FBS support, inspired by [CIM19](https://eprint.iacr.org/2018/622), is experimental.

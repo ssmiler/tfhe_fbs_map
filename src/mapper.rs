@@ -486,7 +486,7 @@ impl Mapper {
     ) -> Result<Vec<usize>, String> {
         match policy {
             SchedulePolicy::Original => Ok(circuit.topological_gates()),
-            SchedulePolicy::Random { seed } => circuit.scheduled_gates_by_key(|id| {
+            SchedulePolicy::Random { seed } => circuit.scheduled_gates_by_key(8, |id| {
                 (splitmix64(seed ^ id as u64) as usize, 0, usize::MAX - id)
             }),
         }
@@ -2605,6 +2605,27 @@ mod tests {
                 .unwrap()
                 != original
         }));
+    }
+
+    #[test]
+    fn random_schedule_window_is_bounded_and_reproducible() {
+        let mut source = ".inputs a b\n.outputs g31\n".to_owned();
+        for i in 0..32 {
+            source.push_str(&format!(".names a b g{i}\n11 1\n"));
+        }
+        let circuit = BoolCircuit::parse_blif(&source).unwrap();
+        let mapper = Mapper::new(MapConfig::default()).unwrap();
+        for seed in 0..8 {
+            let policy = SchedulePolicy::Random { seed };
+            let order = mapper.schedule(&circuit, policy).unwrap();
+            assert_eq!(order, mapper.schedule(&circuit, policy).unwrap());
+            let mut remaining = circuit.topological_gates();
+            for id in order {
+                assert!(remaining.iter().take(8).any(|node| *node == id));
+                remaining.retain(|node| *node != id);
+            }
+            assert!(remaining.is_empty());
+        }
     }
 
     #[test]
