@@ -1,5 +1,11 @@
 #! /bin/bash
 
+# Shell-escape forwarded fbs-map arguments for generated recipes.
+FBS_MAP_ARGS=""
+if (( $# > 0 )); then
+    printf -v FBS_MAP_ARGS ' %q' "$@"
+fi
+
 # clone EPFL benchmarks
 [ -d benchmarks/bristol ] || ( echo "Clone bristol circuit benchmarks" && git clone https://github.com/mkskeller/bristol-fashion.git benchmarks/bristol ) || exit
 
@@ -64,7 +70,7 @@ function run_bench() {
     ALL+=" ${OUT_LBF}"
 
     echo "$OUT $OUT_LBF $LOG: $CIRCUIT | $OUTPUT_DIR"
-    echo -e "\t$FBS_MAP $CIRCUIT --type bristol --fbs-size $FBS_SIZE --mapper $MAPPER --output $OUT --output-lbf ${OUT_LBF} > $LOG 2>&1"
+    echo -e "\t$FBS_MAP $CIRCUIT --type bristol --fbs-size $FBS_SIZE --mapper $MAPPER --output $OUT --output-lbf ${OUT_LBF}$FBS_MAP_ARGS > $LOG 2>&1"
     echo ""
 }
 

@@ -21,12 +21,14 @@ pub enum BoolNode {
 }
 
 impl BoolNode {
+    /// Return the input or gate name.
     pub fn name(&self) -> &str {
         match self {
             Self::Input { name } | Self::Lut { name, .. } => name,
         }
     }
 
+    /// Return the wires consumed by this node.
     pub fn inputs(&self) -> &[BoolWire] {
         match self {
             Self::Input { .. } => &[],
@@ -35,6 +37,7 @@ impl BoolNode {
     }
 }
 
+/// A topologically ordered Boolean circuit with named inputs and outputs.
 #[derive(Clone, Debug, Default)]
 pub struct BoolCircuit {
     pub nodes: Vec<BoolNode>,
@@ -43,6 +46,7 @@ pub struct BoolCircuit {
 }
 
 impl BoolCircuit {
+    /// Read and parse a BLIF circuit from disk.
     pub fn parse_blif_file(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let source =
@@ -50,6 +54,7 @@ impl BoolCircuit {
         Self::parse_blif(&source).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// Parse a BLIF circuit restricted to constants and two-input LUTs.
     pub fn parse_blif(source: &str) -> Result<Self, String> {
         let lines = logical_lines(source);
         let mut circuit = Self::default();
@@ -153,6 +158,7 @@ impl BoolCircuit {
         Ok(circuit)
     }
 
+    /// Read and parse an ISCAS BENCH circuit from disk.
     pub fn parse_bench_file(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let source =
@@ -160,6 +166,7 @@ impl BoolCircuit {
         Self::parse_bench(&source).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// Parse BENCH gates and lower n-ary operations to binary LUTs.
     pub fn parse_bench(source: &str) -> Result<Self, String> {
         let lines = logical_lines(source);
         let mut circuit = Self::default();
@@ -228,6 +235,7 @@ impl BoolCircuit {
         Ok(circuit)
     }
 
+    /// Read and parse a Bristol circuit from disk.
     pub fn parse_bristol_file(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let source =
@@ -235,6 +243,7 @@ impl BoolCircuit {
         Self::parse_bristol(&source).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// Parse a Bristol circuit with single-output Boolean gates.
     pub fn parse_bristol(source: &str) -> Result<Self, String> {
         let lines: Vec<_> = source
             .lines()
@@ -352,6 +361,7 @@ impl BoolCircuit {
         Ok(circuit)
     }
 
+    /// Ensure every node references only constants or earlier nodes.
     pub fn validate_topological(&self) -> Result<(), String> {
         for (id, node) in self.nodes.iter().enumerate() {
             for signal in node.inputs() {
@@ -368,6 +378,7 @@ impl BoolCircuit {
         Ok(())
     }
 
+    /// Iterate over LUT node identifiers in storage order.
     pub fn gate_ids(&self) -> impl Iterator<Item = usize> + '_ {
         self.nodes
             .iter()
@@ -375,10 +386,12 @@ impl BoolCircuit {
             .filter_map(|(id, node)| matches!(node, BoolNode::Lut { .. }).then_some(id))
     }
 
+    /// Return LUT node identifiers in their current topological order.
     pub fn topological_gates(&self) -> Vec<usize> {
         self.gate_ids().collect()
     }
 
+    /// Topologically schedule LUTs, preferring the largest ready-node key.
     pub fn scheduled_gates_by_key<F>(&self, mut key: F) -> Result<Vec<usize>, String>
     where
         F: FnMut(usize) -> (usize, usize, usize),
@@ -421,6 +434,7 @@ impl BoolCircuit {
         Ok(order)
     }
 
+    /// Evaluate the circuit for one complete named input assignment.
     pub fn evaluate(&self, inputs: &HashMap<String, bool>) -> Result<Vec<(String, bool)>, String> {
         let mut values = vec![false; self.nodes.len()];
         for (id, node) in self.nodes.iter().enumerate() {
@@ -444,6 +458,7 @@ impl BoolCircuit {
             .collect())
     }
 
+    /// Enumerate all input assignments for circuits with at most 20 inputs.
     pub fn exhaustive_inputs(&self) -> Result<Vec<HashMap<String, bool>>, String> {
         if self.inputs.len() > 20 {
             return Err(format!(
@@ -467,6 +482,7 @@ impl BoolCircuit {
     }
 }
 
+// Resolve a constant or node wire from already evaluated node values.
 fn signal_value(signal: BoolWire, values: &[bool]) -> bool {
     match signal {
         BoolWire::Const(value) => value,
@@ -474,6 +490,7 @@ fn signal_value(signal: BoolWire, values: &[bool]) -> bool {
     }
 }
 
+// Join continued lines and remove comments and blank lines.
 fn logical_lines(source: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = String::new();
@@ -498,6 +515,7 @@ fn logical_lines(source: &str) -> Vec<String> {
     result
 }
 
+// Parse an operation invocation such as `AND(a, b)`.
 fn parse_bench_invocation(expression: &str) -> Result<(String, Vec<&str>), String> {
     let expression = expression.trim();
     let open = expression
@@ -532,6 +550,7 @@ fn parse_bench_invocation(expression: &str) -> Result<(String, Vec<&str>), Strin
     Ok((operation, inputs))
 }
 
+// Lower one BENCH operation to supported unary or binary LUT nodes.
 fn lower_bench_gate(
     circuit: &mut BoolCircuit,
     output: &str,
@@ -594,6 +613,7 @@ fn lower_bench_gate(
     }
 }
 
+// Append a LUT node and return its output wire.
 fn push_bench_lut(
     circuit: &mut BoolCircuit,
     name: String,
@@ -609,6 +629,7 @@ fn push_bench_lut(
     BoolWire::Node(id)
 }
 
+// Return the two-input truth table for a supported BENCH operation.
 fn bench_binary_truth_table(operation: &str) -> Option<Vec<u8>> {
     match operation {
         "XOR" => Some(vec![0, 1, 1, 0]),
@@ -621,6 +642,7 @@ fn bench_binary_truth_table(operation: &str) -> Option<Vec<u8>> {
     }
 }
 
+// Expand BLIF cover rows into a complete Boolean truth table.
 fn parse_cover(input_count: usize, covers: &[String]) -> Result<Vec<u8>, String> {
     if input_count == 0 {
         if covers.is_empty() {
@@ -671,6 +693,7 @@ fn parse_cover(input_count: usize, covers: &[String]) -> Result<Vec<u8>, String>
     Ok(table)
 }
 
+// Parse a single Boolean digit.
 fn parse_bit(value: &str) -> Result<u8, String> {
     match value {
         "0" => Ok(0),
@@ -679,6 +702,7 @@ fn parse_bit(value: &str) -> Result<u8, String> {
     }
 }
 
+// Parse every whitespace-separated word as an unsigned integer.
 fn parse_usize_words(line: &str) -> Result<Vec<usize>, String> {
     line.split_whitespace()
         .map(|word| {
@@ -688,6 +712,7 @@ fn parse_usize_words(line: &str) -> Result<Vec<usize>, String> {
         .collect()
 }
 
+// Validate a grouped Bristol header and return its total wire count.
 fn grouped_wire_count(header: &[usize], kind: &str) -> Result<usize, String> {
     let Some((&groups, widths)) = header.split_first() else {
         return Err(format!("missing Bristol {kind} header"));
@@ -701,6 +726,7 @@ fn grouped_wire_count(header: &[usize], kind: &str) -> Result<usize, String> {
     Ok(widths.iter().sum())
 }
 
+// Return the truth table for a supported Bristol operation and arity.
 fn bristol_truth_table(operation: &str, arity: usize) -> Result<Vec<u8>, String> {
     let table = match (operation, arity) {
         ("INV" | "NOT", 1) => vec![1, 0],

@@ -22,6 +22,7 @@ pub enum LutNode {
     },
 }
 
+/// Aggregate size and complexity metrics for a mapped LUT circuit.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MappingStats {
     pub input_count: usize,
@@ -33,6 +34,7 @@ pub struct MappingStats {
 }
 
 impl MappingStats {
+    /// Return the lexicographic key used to compare mapping quality.
     pub fn quality_key(&self) -> (usize, usize, u128, usize) {
         (
             self.bootstrap_count,
@@ -43,6 +45,7 @@ impl MappingStats {
     }
 }
 
+/// An interned circuit of inputs, linear combinations, and bootstraps.
 #[derive(Clone, Debug, Default)]
 pub struct LutCircuit {
     pub nodes: Vec<LutNode>,
@@ -55,6 +58,7 @@ pub struct LutCircuit {
     bootstrap_forms: HashMap<Vec<usize>, Vec<Vec<i64>>>,
 }
 
+/// Reusable lookup state for finding an existing bootstrap input form.
 pub(crate) struct BootstrapLookup {
     basis: Vec<(usize, i64, i64)>,
     constants: (i64, i64),
@@ -62,10 +66,12 @@ pub(crate) struct BootstrapLookup {
 }
 
 impl BootstrapLookup {
+    // Test whether normalized scales identify an existing bootstrap input.
     pub(crate) fn has_bootstrap(
         &mut self,
         circuit: &LutCircuit,
         scales: (i64, i64),
+        divisor: i64,
         constant: i64,
     ) -> bool {
         let LutNode::Linear {
@@ -77,12 +83,25 @@ impl BootstrapLookup {
         };
         terms.clear();
         for &(node, left, right) in &self.basis {
-            let coefficient = scales.0 * left + scales.1 * right;
+            let raw_coefficient = scales.0 * left + scales.1 * right;
+            let Some(coefficient) = raw_coefficient.checked_div(divisor) else {
+                return false;
+            };
+            if coefficient.checked_mul(divisor) != Some(raw_coefficient) {
+                return false;
+            }
             if coefficient != 0 {
                 terms.push((coefficient, node));
             }
         }
-        *offset = constant + scales.0 * self.constants.0 + scales.1 * self.constants.1;
+        let raw_offset = scales.0 * self.constants.0 + scales.1 * self.constants.1;
+        let Some(normalized_offset) = raw_offset.checked_div(divisor) else {
+            return false;
+        };
+        if normalized_offset.checked_mul(divisor) != Some(raw_offset) {
+            return false;
+        }
+        *offset = constant + normalized_offset;
         let input = if terms.len() == 1 && terms[0].0 == 1 && *offset == 0 {
             Some(terms[0].1)
         } else {
@@ -93,10 +112,12 @@ impl BootstrapLookup {
 }
 
 impl LutCircuit {
+    /// Enable or disable grouping bootstraps that share a linear input.
     pub fn set_multioutput_fbs(&mut self, enabled: bool) {
         self.multioutput_fbs = enabled;
     }
 
+    /// Intern a named Boolean input and return its signal.
     pub fn input(&mut self, name: &str) -> LutSignal {
         self.intern(
             LutNode::Input {
@@ -107,6 +128,7 @@ impl LutCircuit {
         )
     }
 
+    /// Flatten and intern a linear combination of existing signals.
     pub fn linear(&mut self, terms: &[(i64, LutSignal)], mut constant: i64) -> LutSignal {
         let terms = if self.multioutput_fbs {
             let (mut flattened, flattened_constant) = self.flatten_linear(terms, constant);
@@ -159,6 +181,7 @@ impl LutCircuit {
         )
     }
 
+    // Flatten nested linear nodes and combine coefficients by input identifier.
     fn flatten_linear(
         &self,
         terms: &[(i64, LutSignal)],
@@ -189,6 +212,7 @@ impl LutCircuit {
         (flattened, constant)
     }
 
+    // Flatten nested linear nodes while preserving term order and repetition.
     fn flatten_linear_ordered(
         &self,
         terms: &[(i64, LutSignal)],
@@ -217,6 +241,7 @@ impl LutCircuit {
         (flattened, constant)
     }
 
+    // Prepare reusable state for probing scaled combinations of two bases.
     pub(crate) fn prepare_bootstrap_lookup(
         &self,
         basis: impl IntoIterator<Item = (usize, i64, i64)>,
@@ -256,6 +281,7 @@ impl LutCircuit {
         })
     }
 
+    // Return reusable coefficient forms reordered to match the requested support.
     pub(crate) fn reusable_linear_coefficients(&self, support: &[usize]) -> Vec<Vec<i64>> {
         let mut key = support.to_vec();
         key.sort_unstable();
@@ -273,6 +299,7 @@ impl LutCircuit {
             .collect()
     }
 
+    // Index the support and coefficients of a bootstrap's linear input.
     fn record_bootstrap_input(&mut self, input: usize) {
         self.bootstrap_inputs.insert(input);
         let (support, coefficients) = match &self.nodes[input] {
@@ -291,6 +318,7 @@ impl LutCircuit {
         }
     }
 
+    /// Apply a Boolean lookup table to a constant or bounded node signal.
     pub fn bootstrap(&mut self, signal: LutSignal, table: Vec<u8>) -> Result<LutSignal, String> {
         match signal {
             LutSignal::Const(value) => {
@@ -324,10 +352,12 @@ impl LutCircuit {
         }
     }
 
+    /// Append a named circuit output.
     pub fn add_output(&mut self, name: String, signal: LutSignal) {
         self.outputs.push((name, signal));
     }
 
+    /// Return the inclusive value bounds of a signal.
     pub fn bounds(&self, signal: LutSignal) -> (i64, i64) {
         match signal {
             LutSignal::Const(value) => (value, value),
@@ -335,6 +365,7 @@ impl LutCircuit {
         }
     }
 
+    /// Return the printable name of a constant or node signal.
     pub fn signal_name(&self, signal: LutSignal) -> String {
         match signal {
             LutSignal::Const(value) => value.to_string(),
@@ -342,6 +373,7 @@ impl LutCircuit {
         }
     }
 
+    /// Return the source name for an input or a generated node name.
     pub fn node_name(&self, id: usize) -> String {
         match &self.nodes[id] {
             LutNode::Input { name } => name.clone(),
@@ -349,6 +381,7 @@ impl LutCircuit {
         }
     }
 
+    // Reuse an identical node or append it with its bounds and norm.
     fn intern(&mut self, node: LutNode, bounds: (i64, i64), norm2: u128) -> LutSignal {
         if let Some(id) = self.cache.get(&node) {
             return LutSignal::Node(*id);
@@ -361,6 +394,7 @@ impl LutCircuit {
         LutSignal::Node(id)
     }
 
+    /// Evaluate the circuit for one complete named Boolean assignment.
     pub fn evaluate(&self, inputs: &HashMap<String, bool>) -> Result<Vec<(String, bool)>, String> {
         let mut values = vec![0i64; self.nodes.len()];
         for (id, node) in self.nodes.iter().enumerate() {
@@ -401,6 +435,7 @@ impl LutCircuit {
             .collect()
     }
 
+    /// Remove nodes unreachable from circuit outputs and rebuild internal indexes.
     pub fn prune(&mut self) {
         let mut live = HashSet::new();
         let mut stack: Vec<_> = self
@@ -483,6 +518,7 @@ impl LutCircuit {
         }
     }
 
+    /// Compute structural and maximum-complexity statistics for the circuit.
     pub fn stats(&self) -> MappingStats {
         let mut stats = MappingStats {
             output_count: self.outputs.len(),
@@ -507,6 +543,7 @@ impl LutCircuit {
         stats
     }
 
+    // Group bootstrap nodes by shared input when multi-output FBS is enabled.
     fn bootstrap_groups(&self) -> HashMap<usize, Vec<usize>> {
         let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut input_leaders = HashMap::new();
@@ -523,6 +560,7 @@ impl LutCircuit {
         groups
     }
 
+    /// Serialize the circuit in the textual FBS format.
     pub fn to_fbs(&self) -> String {
         let mut output = String::new();
         let bootstrap_groups = self.bootstrap_groups();
@@ -582,6 +620,7 @@ impl LutCircuit {
         output
     }
 
+    /// Serialize the circuit in the line-based LBF format.
     pub fn to_lbf(&self) -> String {
         let mut output = String::new();
         let bootstrap_groups = self.bootstrap_groups();
@@ -714,7 +753,7 @@ mod tests {
                     let input = reference.linear(&[(left, x), (right, y)], constant);
                     let expected = matches!(input, LutSignal::Node(node) if circuit.bootstrap_inputs.contains(&node));
                     assert_eq!(
-                        lookup.has_bootstrap(&circuit, (left, right), constant),
+                        lookup.has_bootstrap(&circuit, (left, right), 1, constant),
                         expected
                     );
                 }
@@ -726,15 +765,17 @@ mod tests {
                 .is_none()
         );
         let mut identity = circuit.prepare_bootstrap_lookup([(0, 1, 0)]).unwrap();
-        assert!(identity.has_bootstrap(&circuit, (1, 0), 0));
+        assert!(identity.has_bootstrap(&circuit, (1, 0), 1, 0));
+        let mut scaled_identity = circuit.prepare_bootstrap_lookup([(0, -2, 0)]).unwrap();
+        assert!(scaled_identity.has_bootstrap(&circuit, (1, 0), -2, 0));
         let mut empty = circuit.prepare_bootstrap_lookup([]).unwrap();
-        assert!(!empty.has_bootstrap(&circuit, (1, 1), 0));
+        assert!(!empty.has_bootstrap(&circuit, (1, 1), 1, 0));
         let mut fresh = LutCircuit::default();
         let a = fresh.input("a");
         let mut lookup = fresh.prepare_bootstrap_lookup([(0, 1, 0)]).unwrap();
-        assert!(!lookup.has_bootstrap(&fresh, (1, 0), 0));
+        assert!(!lookup.has_bootstrap(&fresh, (1, 0), 1, 0));
         fresh.bootstrap(a, vec![0, 1]).unwrap();
-        assert!(lookup.has_bootstrap(&fresh, (1, 0), 0));
+        assert!(lookup.has_bootstrap(&fresh, (1, 0), 1, 0));
     }
 
     #[test]

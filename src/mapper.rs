@@ -1,5 +1,6 @@
 use crate::circuit::{BoolCircuit, BoolNode, BoolWire};
 use crate::lut::{LutCircuit, LutSignal};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -16,6 +17,7 @@ pub enum SchedulePolicy {
     Random { seed: u64 },
 }
 
+/// Controls mapping limits, candidate selection, scheduling, and reuse.
 #[derive(Clone, Debug)]
 pub struct MapConfig {
     pub fbs_size: usize,
@@ -25,10 +27,10 @@ pub struct MapConfig {
     pub coefficient_policy: CoefficientPolicy,
     pub schedule_policy: SchedulePolicy,
     pub multioutput_fbs: bool,
-    pub log_decisions: bool,
 }
 
 impl Default for MapConfig {
+    /// Return the default search mapper configuration.
     fn default() -> Self {
         Self {
             fbs_size: 3,
@@ -38,20 +40,21 @@ impl Default for MapConfig {
             coefficient_policy: CoefficientPolicy::MinSpan,
             schedule_policy: SchedulePolicy::Original,
             multioutput_fbs: false,
-            log_decisions: false,
         }
     }
 }
 
+/// A Boolean cone together with its linear encoding and attainable values.
 #[derive(Clone, Debug)]
 struct Cone {
-    support: Vec<usize>,
-    coefficients: Vec<i64>,
-    truth_table: Vec<u8>,
-    multivalue_table: Vec<i64>,
+    support: Vec<usize>,        // N variables
+    coefficients: Vec<i64>,     // N coefficients, one per support variable
+    truth_table: Vec<u8>,       // 2^N Booleans
+    multivalue_table: Vec<i64>, // 2^N integers
 }
 
 impl Cone {
+    // Build a support-free cone for one Boolean constant.
     fn constant(value: u8) -> Self {
         Self {
             support: Vec::new(),
@@ -61,6 +64,7 @@ impl Cone {
         }
     }
 
+    // Build an identity cone over one source node.
     fn identity(node: usize) -> Self {
         Self {
             support: vec![node],
@@ -70,25 +74,70 @@ impl Cone {
         }
     }
 
+    // Return a value only for cones using the canonical constant representation.
+    fn constant_value(&self) -> Option<u8> {
+        (self.support.is_empty() && self.truth_table.len() == 1).then(|| self.truth_table[0])
+    }
+
+    // Return the inclusive range width of the cone's linear values.
     fn span(&self) -> usize {
         table_span(&self.multivalue_table)
     }
 
+    // Return the sum of squared coefficients in the cone's linear form.
     fn norm2(&self) -> u128 {
         coefficients_norm2(&self.coefficients)
     }
 }
 
+/// A normalized composition ready to be merged into the output cone.
 #[derive(Clone, Debug)]
 struct Candidate {
     scales: (i64, i64),
+    coefficients: Vec<i64>,
     multivalue_table: Vec<i64>,
 }
 
-type CandidateScore = (u8, u128, u128, u128, i64, i64);
+/// Lexicographic heuristic metrics for selecting a candidate scale pair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Score {
+    reuse_cost: u8,
+    span: u128,
+    energy: u128,
+    norm2: u128,
+    a: i64,
+    b: i64,
+}
+
+impl PartialOrd for Score {
+    // Expose the total candidate ranking through PartialOrd.
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.ordering(other))
+    }
+
+    // Keep `<` explicit and consistent with the complete score ordering.
+    fn lt(&self, other: &Self) -> bool {
+        self.ordering(other).is_lt()
+    }
+}
+
+impl Score {
+    // Compare fields lexicographically in heuristic priority order.
+    fn ordering(&self, other: &Self) -> Ordering {
+        self.reuse_cost
+            .cmp(&other.reuse_cost)
+            .then_with(|| self.span.cmp(&other.span))
+            .then_with(|| self.energy.cmp(&other.energy))
+            .then_with(|| self.norm2.cmp(&other.norm2))
+            .then_with(|| self.a.cmp(&other.a))
+            .then_with(|| self.b.cmp(&other.b))
+    }
+}
+
 type CompositionTables = (Vec<(i64, i64)>, Vec<u8>);
 type ConeUpdates = [Option<Cone>; 2];
 
+/// A compacted input-value pair, output bit, and assignment multiplicity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CandidateRow {
     x: i64,
@@ -97,6 +146,7 @@ struct CandidateRow {
     count: usize,
 }
 
+// Expand paired cone values and truth bits into candidate rows.
 fn candidate_rows<'a>(
     xy: &'a [(i64, i64)],
     truth_table: &'a [u8],
@@ -111,6 +161,7 @@ fn candidate_rows<'a>(
         })
 }
 
+// Collapse repeated candidate rows while preserving assignment multiplicity.
 fn compact_candidate_rows(
     xy: &[(i64, i64)],
     truth_table: &[u8],
@@ -157,6 +208,7 @@ fn compact_candidate_rows(
     Some(rows)
 }
 
+/// Weighted moments used to evaluate each candidate's energy in constant time.
 struct EnergyMoments {
     xx: i128,
     xy: i128,
@@ -164,6 +216,7 @@ struct EnergyMoments {
 }
 
 impl EnergyMoments {
+    // Precompute weighted quadratic moments for candidate rows.
     fn new(rows: &[CandidateRow]) -> Option<Self> {
         let mut moments = Self {
             xx: 0,
@@ -185,6 +238,7 @@ impl EnergyMoments {
         Some(moments)
     }
 
+    // Evaluate the quadratic energy for one pair of scales.
     fn energy(&self, scales: (i64, i64)) -> Option<u128> {
         let (a, b) = (i128::from(scales.0), i128::from(scales.1));
         let xx = a.checked_mul(a)?.checked_mul(self.xx)?;
@@ -194,6 +248,7 @@ impl EnergyMoments {
     }
 }
 
+// Compute candidate energy from moments, with a checked row-wise fallback.
 fn candidate_energy(
     rows: &[CandidateRow],
     moments: Option<&EnergyMoments>,
@@ -217,41 +272,60 @@ fn candidate_energy(
         })
 }
 
+/// Reusable buffers for evaluating scale pairs over the same two input cones.
 struct CandidateWorkspace {
     coefficient_basis: Vec<(i64, i64)>,
+    coefficients: Vec<i64>,
     known: Vec<u8>,
 }
 
 impl CandidateWorkspace {
+    // Build the merged-support coefficient basis used by candidate evaluation.
     fn new(left: &Cone, right: &Cone) -> Self {
         let support = union_support(&left.support, &right.support);
+        let coefficient_basis = support
+            .iter()
+            .map(|node| coefficient_pair(left, right, *node))
+            .collect();
         Self {
-            coefficient_basis: support
-                .iter()
-                .map(|node| coefficient_pair(left, right, *node))
-                .collect(),
+            coefficient_basis,
+            coefficients: Vec::with_capacity(support.len()),
             known: Vec::new(),
         }
     }
 
-    fn evaluate(
+    // Merge and canonicalize the scaled input coefficients once per candidate.
+    fn prepare_coefficients(&mut self, scales: (i64, i64)) -> Option<i64> {
+        let (a, b) = scales;
+        self.coefficients.clear();
+        for &(left, right) in &self.coefficient_basis {
+            self.coefficients
+                .push(a.checked_mul(left)?.checked_add(b.checked_mul(right)?)?);
+        }
+        let divisor = coefficient_normalization_divisor(&self.coefficients);
+        for coefficient in &mut self.coefficients {
+            *coefficient = coefficient.checked_div(divisor)?;
+        }
+        Some(divisor)
+    }
+
+    // Validate prepared coefficients and return their complete heuristic score.
+    fn evaluate_prepared(
         &mut self,
         mapper: &Mapper,
         rows: impl IntoIterator<Item = CandidateRow>,
         scales: (i64, i64),
-    ) -> Option<(u128, i64)> {
+        divisor: i64,
+        energy: u128,
+        reuse_cost: impl FnOnce(i64) -> u8,
+    ) -> Option<Score> {
         let mut rows = rows.into_iter().peekable();
         rows.peek()?;
 
-        // The table enumerates independent Boolean support assignments.
         let mut minimum = 0i64;
         let mut span = 1u128;
         let mut norm2 = 0u128;
-        for &(left, right) in &self.coefficient_basis {
-            let coefficient = scales
-                .0
-                .checked_mul(left)?
-                .checked_add(scales.1.checked_mul(right)?)?;
+        for &coefficient in &self.coefficients {
             let absolute = coefficient.unsigned_abs() as u128;
             span += absolute;
             if span > mapper.config.max_fbs_size as u128 {
@@ -267,7 +341,14 @@ impl CandidateWorkspace {
         self.known.clear();
         self.known.resize(span as usize, 2);
         for row in rows {
-            let value = scales.0 * row.x + scales.1 * row.y;
+            let raw_value = scales
+                .0
+                .checked_mul(row.x)?
+                .checked_add(scales.1.checked_mul(row.y)?)?;
+            let value = raw_value.checked_div(divisor)?;
+            if value.checked_mul(divisor)? != raw_value {
+                return None;
+            }
             let index = usize::try_from(value.checked_sub(minimum)?).ok()?;
             let entry = self.known.get_mut(index)?;
             if row.truth > 1 || (*entry != 2 && *entry != row.truth) {
@@ -275,11 +356,33 @@ impl CandidateWorkspace {
             }
             *entry = row.truth;
         }
-        mapper
-            .is_known_lut_valid(&self.known)
-            .then_some((norm2, minimum))
+        mapper.is_known_lut_valid(&self.known).then(|| Score {
+            reuse_cost: reuse_cost(minimum),
+            span,
+            energy,
+            norm2,
+            a: scales.0,
+            b: scales.1,
+        })
     }
 
+    // Prepare and score a candidate without multi-output reuse information.
+    fn evaluate(
+        &mut self,
+        mapper: &Mapper,
+        rows: impl IntoIterator<Item = CandidateRow>,
+        scales: (i64, i64),
+    ) -> Option<(Score, i64)> {
+        let rows: Vec<_> = rows.into_iter().collect();
+        let divisor = self.prepare_coefficients(scales)?;
+        let divisor_squared = (divisor.unsigned_abs() as u128).checked_pow(2)?;
+        let energy = candidate_energy(&rows, EnergyMoments::new(&rows).as_ref(), scales)?
+            .checked_div(divisor_squared)?;
+        let score = self.evaluate_prepared(mapper, rows, scales, divisor, energy, |_| 1)?;
+        Some((score, divisor))
+    }
+
+    // Test whether the coefficient basis spans two independent directions.
     fn independent_basis(&self) -> bool {
         let Some(&(first, second)) = self.coefficient_basis.iter().find(|pair| **pair != (0, 0))
         else {
@@ -291,20 +394,22 @@ impl CandidateWorkspace {
     }
 }
 
+/// Gate and input-basis identity used to cache selected scale pairs.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct CandidateCacheKey {
     truth_table: Vec<u8>,
-    first_basis: Vec<i64>,
-    second_basis: Vec<i64>,
+    basis: Vec<(i64, i64)>,
 }
 
 type CandidateCache = HashMap<CandidateCacheKey, Option<(i64, i64)>>;
 
+/// Maps Boolean circuits into FBS LUT circuits according to its configuration.
 pub struct Mapper {
     pub config: MapConfig,
 }
 
 impl Mapper {
+    /// Validate and construct a mapper configuration.
     pub fn new(config: MapConfig) -> Result<Self, String> {
         if config.fbs_size < 2 {
             return Err("FBS size must be at least 2".to_owned());
@@ -325,18 +430,11 @@ impl Mapper {
         Ok(Self { config })
     }
 
-    fn info(&self, arguments: fmt::Arguments<'_>) {
-        if self.config.log_decisions {
-            eprintln!("INFO mapper: {arguments}");
-        }
-    }
-
-    fn info_cone(&self, label: fmt::Arguments<'_>, cone: &Cone) {
-        if !self.config.log_decisions {
-            return;
-        }
-        eprintln!(
-            "INFO mapper: {label}: support={:?} coefficients={:?} tt={:?} mvt={:?} span={} norm2={}",
+    // Trace the complete symbolic state of one cone.
+    fn trace_cone(&self, label: fmt::Arguments<'_>, cone: &Cone) {
+        log::trace!(
+            target: "mapper",
+            "{label}: support={:?} coefficients={:?} tt={:?} mvt={:?} span={} norm2={}",
             cone.support,
             cone.coefficients,
             cone.truth_table,
@@ -346,21 +444,22 @@ impl Mapper {
         );
     }
 
-    fn info_candidate(&self, attempt: usize, candidate: Option<&Candidate>, truth_table: &[u8]) {
-        if !self.config.log_decisions {
-            return;
-        }
+    // Trace the complete result of one candidate-selection attempt.
+    fn trace_candidate(&self, attempt: usize, candidate: Option<&Candidate>, truth_table: &[u8]) {
         match candidate {
-            Some(candidate) => self.info(format_args!(
-                "candidate attempt={attempt} scales={:?} tt={truth_table:?} mvt={:?}",
-                candidate.scales, candidate.multivalue_table
-            )),
-            None => self.info(format_args!(
+            Some(candidate) => log::trace!(
+                target: "mapper",
+                "candidate attempt={attempt} scales={:?} coefficients={:?} tt={truth_table:?} mvt={:?}",
+                candidate.scales, candidate.coefficients, candidate.multivalue_table
+            ),
+            None => log::trace!(
+                target: "mapper",
                 "candidate attempt={attempt} scales=None tt={truth_table:?}"
-            )),
+            ),
         }
     }
 
+    /// Map a Boolean circuit and prune nodes unreachable from its outputs.
     pub fn map(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
         if self.config.coefficient_policy == CoefficientPolicy::Basic {
             let mapped = self.map_basic(circuit)?;
@@ -379,6 +478,7 @@ impl Mapper {
         self.map_once(circuit)
     }
 
+    // Select the configured deterministic or randomized gate schedule.
     fn schedule(
         &self,
         circuit: &BoolCircuit,
@@ -392,6 +492,7 @@ impl Mapper {
         }
     }
 
+    // Perform one complete optimized mapping pass over a scheduled circuit.
     fn map_once(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
         let order = self.schedule(circuit, self.config.schedule_policy)?;
         let mut environment = LutCircuit::default();
@@ -434,27 +535,28 @@ impl Mapper {
                 });
             }
 
-            if self.config.log_decisions {
+            if log::log_enabled!(target: "mapper", log::Level::Debug) {
                 let input_names: Vec<_> = inputs
                     .iter()
                     .map(|input| bool_wire_name(circuit, *input))
                     .collect();
-                self.info(format_args!(
+                log::debug!(
+                    target: "mapper",
                     "gate id={gate_id} name={name} inputs={input_names:?} table={table:?}"
-                ));
+                );
                 for (position, cone) in input_cones.iter().enumerate() {
-                    self.info_cone(format_args!("gate {name} input[{position}]"), cone);
+                    self.trace_cone(format_args!("gate {name} input[{position}]"), cone);
                 }
             }
 
             let (cone, updates) =
                 self.map_gate(&mut environment, input_cones, table, &mut candidate_cache)?;
-            self.info_cone(format_args!("gate {name} result"), &cone);
+            self.trace_cone(format_args!("gate {name} result"), &cone);
             for (position, replacement) in updates.into_iter().enumerate() {
                 if let Some(replacement) = replacement
                     && let BoolWire::Node(id) = inputs[position]
                 {
-                    self.info_cone(
+                    self.trace_cone(
                         format_args!("gate {name} updates input {}", circuit.nodes[id].name()),
                         &replacement,
                     );
@@ -463,9 +565,10 @@ impl Mapper {
             }
 
             let cone = if !self.config.multioutput_fbs && forced_outputs[gate_id] {
-                self.info(format_args!(
+                log::debug!(
+                    target: "mapper",
                     "bootstrap reason=forced-output gate={name} position={gate_id}"
-                ));
+                );
                 self.bootstrap_cone(&mut environment, cone)?
             } else {
                 cone
@@ -480,19 +583,21 @@ impl Mapper {
                     .clone()
                     .ok_or_else(|| format!("output '{name}' was not mapped"))?,
             };
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "output name={name} source={}",
                 bool_wire_name(circuit, *output)
-            ));
-            self.info_cone(format_args!("output {name} cone"), &cone);
+            );
+            self.trace_cone(format_args!("output {name} cone"), &cone);
             let signal = self.output_signal(&mut environment, cone)?;
-            self.info(format_args!("output name={name} signal={signal:?}"));
+            log::debug!(target: "mapper", "output name={name} signal={signal:?}");
             environment.add_output(name.clone(), signal);
         }
         environment.prune();
         Ok(environment)
     }
 
+    // Map each Boolean LUT independently without cone composition search.
     fn map_basic(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
         let mut environment = LutCircuit::default();
         environment.set_multioutput_fbs(self.config.multioutput_fbs);
@@ -509,15 +614,16 @@ impl Mapper {
                 inputs,
                 table,
             } = &circuit.nodes[id]
-                && self.config.log_decisions
+                && log::log_enabled!(target: "mapper", log::Level::Debug)
             {
                 let input_names: Vec<_> = inputs
                     .iter()
                     .map(|input| bool_wire_name(circuit, *input))
                     .collect();
-                self.info(format_args!(
+                log::debug!(
+                    target: "mapper",
                     "basic gate id={id} name={name} inputs={input_names:?} table={table:?}"
-                ));
+                );
             }
             wires[id] = match &circuit.nodes[id] {
                 BoolNode::Input { .. } => unreachable!(),
@@ -590,27 +696,30 @@ impl Mapper {
                     }
                 }
             };
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "basic gate id={id} name={} signal={:?}",
                 circuit.nodes[id].name(),
                 wires[id]
-            ));
+            );
         }
         for (name, output) in &circuit.outputs {
             let signal = match output {
                 BoolWire::Const(value) => LutSignal::Const(i64::from(*value)),
                 BoolWire::Node(id) => wires[*id],
             };
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "output name={name} source={} signal={signal:?}",
                 bool_wire_name(circuit, *output)
-            ));
+            );
             environment.add_output(name.clone(), signal);
         }
         environment.prune();
         Ok(environment)
     }
 
+    // Dispatch unary, constant-input, and general binary gates.
     fn map_gate(
         &self,
         environment: &mut LutCircuit,
@@ -619,29 +728,30 @@ impl Mapper {
         candidate_cache: &mut CandidateCache,
     ) -> Result<(Cone, ConeUpdates), String> {
         match inputs.len() {
-            1 => {
-                let cone = inputs.pop().unwrap();
-                if gate_table.len() != 2 {
-                    return Err("unary gate must have a two-entry table".to_owned());
-                }
-                let truth_table: Vec<u8> = cone
-                    .truth_table
-                    .iter()
-                    .map(|value| gate_table[*value as usize])
-                    .collect();
-                if all_equal(&truth_table) {
-                    return Ok((Cone::constant(truth_table[0]), [None, None]));
-                }
-                let result = Cone {
-                    truth_table,
-                    ..cone
-                };
-                self.validate_cone(&result)?;
-                Ok((result, [None, None]))
-            }
+            1 => self.map_unary_gate(inputs.pop().unwrap(), gate_table),
             2 => {
                 let right = inputs.pop().unwrap();
                 let left = inputs.pop().unwrap();
+                if gate_table.len() != 4 {
+                    return Err("binary gate must have a four-entry table".to_owned());
+                }
+                if let Some(constant) = left.constant_value() {
+                    let offset = 2 * constant as usize;
+                    log::debug!(
+                        target: "mapper",
+                        "dispatch binary gate to unary constant_position=0 constant={constant}"
+                    );
+                    return self.map_unary_gate(right, &gate_table[offset..offset + 2]);
+                }
+                if let Some(constant) = right.constant_value() {
+                    let constant = constant as usize;
+                    let unary_table = [gate_table[constant], gate_table[2 + constant]];
+                    log::debug!(
+                        target: "mapper",
+                        "dispatch binary gate to unary constant_position=1 constant={constant}"
+                    );
+                    return self.map_unary_gate(left, &unary_table);
+                }
                 self.map_binary_gate(
                     environment,
                     left,
@@ -654,6 +764,28 @@ impl Mapper {
         }
     }
 
+    // Apply a unary LUT directly, without searching for a binary composition.
+    fn map_unary_gate(&self, cone: Cone, gate_table: &[u8]) -> Result<(Cone, ConeUpdates), String> {
+        if gate_table.len() != 2 {
+            return Err("unary gate must have a two-entry table".to_owned());
+        }
+        let truth_table: Vec<u8> = cone
+            .truth_table
+            .iter()
+            .map(|value| gate_table[*value as usize])
+            .collect();
+        if all_equal(&truth_table) {
+            return Ok((Cone::constant(truth_table[0]), [None, None]));
+        }
+        let result = Cone {
+            truth_table,
+            ..cone
+        };
+        self.validate_cone(&result)?;
+        Ok((result, [None, None]))
+    }
+
+    // Map a binary LUT by composing cones or bootstrapping inputs as needed.
     fn map_binary_gate(
         &self,
         environment: &mut LutCircuit,
@@ -662,9 +794,6 @@ impl Mapper {
         mut gate_table: Vec<u8>,
         candidate_cache: &mut CandidateCache,
     ) -> Result<(Cone, ConeUpdates), String> {
-        if gate_table.len() != 4 {
-            return Err("binary gate must have a four-entry table".to_owned());
-        }
         let mut left_position = 0usize;
         let mut right_position = 1usize;
         if cone_order_key(&left) < cone_order_key(&right) {
@@ -675,18 +804,20 @@ impl Mapper {
                 &mut right_position,
                 &mut gate_table,
             );
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "switch binary inputs left_position={left_position} right_position={right_position} table={gate_table:?}"
-            ));
+            );
         }
         let mut updates = [None, None];
 
         let support_size = union_support_size(&left.support, &right.support);
         if support_size > self.config.max_truth_table_inputs {
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "bootstrap reason=support-limit input_position={left_position} support_size={support_size} limit={}",
                 self.config.max_truth_table_inputs
-            ));
+            );
             left = self.bootstrap_cone(environment, left)?;
             updates[left_position] = Some(left.clone());
             switch_inputs(
@@ -699,11 +830,12 @@ impl Mapper {
             if union_support_size(&left.support, &right.support)
                 > self.config.max_truth_table_inputs
             {
-                self.info(format_args!(
+                log::debug!(
+                    target: "mapper",
                     "bootstrap reason=support-limit input_position={left_position} support_size={} limit={}",
                     union_support_size(&left.support, &right.support),
                     self.config.max_truth_table_inputs
-                ));
+                );
                 left = self.bootstrap_cone(environment, left)?;
                 updates[left_position] = Some(left.clone());
             }
@@ -711,10 +843,11 @@ impl Mapper {
 
         let (xy, truth_table) = cone_composition_tables(&left, &right, &gate_table)?;
         if all_equal(&truth_table) {
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "candidate attempt=1 constant={}",
                 truth_table[0]
-            ));
+            );
             return Ok((Cone::constant(truth_table[0]), updates));
         }
         let candidate = self.find_candidate(
@@ -725,23 +858,25 @@ impl Mapper {
             &truth_table,
             candidate_cache,
         );
-        self.info_candidate(1, candidate.as_ref(), &truth_table);
+        self.trace_candidate(1, candidate.as_ref(), &truth_table);
         if let Some(candidate) = candidate {
             let cone = self.merge_cones(left, right, candidate, truth_table)?;
             return Ok((cone, updates));
         }
 
-        self.info(format_args!(
+        log::debug!(
+            target: "mapper",
             "bootstrap reason=no-valid-candidate attempt=1 input_position={left_position}"
-        ));
+        );
         left = self.bootstrap_cone(environment, left)?;
         updates[left_position] = Some(left.clone());
         let (xy, truth_table) = cone_composition_tables(&left, &right, &gate_table)?;
         if all_equal(&truth_table) {
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "candidate attempt=2 constant={}",
                 truth_table[0]
-            ));
+            );
             return Ok((Cone::constant(truth_table[0]), updates));
         }
         let candidate = self.find_candidate(
@@ -752,23 +887,25 @@ impl Mapper {
             &truth_table,
             candidate_cache,
         );
-        self.info_candidate(2, candidate.as_ref(), &truth_table);
+        self.trace_candidate(2, candidate.as_ref(), &truth_table);
         if let Some(candidate) = candidate {
             let cone = self.merge_cones(left, right, candidate, truth_table)?;
             return Ok((cone, updates));
         }
 
-        self.info(format_args!(
+        log::debug!(
+            target: "mapper",
             "bootstrap reason=no-valid-candidate attempt=2 input_position={right_position}"
-        ));
+        );
         right = self.bootstrap_cone(environment, right)?;
         updates[right_position] = Some(right.clone());
         let (xy, truth_table) = cone_composition_tables(&left, &right, &gate_table)?;
         if all_equal(&truth_table) {
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "candidate attempt=3 constant={}",
                 truth_table[0]
-            ));
+            );
             return Ok((Cone::constant(truth_table[0]), updates));
         }
         let candidate = self.find_candidate(
@@ -779,7 +916,7 @@ impl Mapper {
             &truth_table,
             candidate_cache,
         );
-        self.info_candidate(3, candidate.as_ref(), &truth_table);
+        self.trace_candidate(3, candidate.as_ref(), &truth_table);
         let candidate = candidate.ok_or_else(|| {
             "no valid composition after bootstrapping both inputs as needed".to_owned()
         })?;
@@ -787,6 +924,7 @@ impl Mapper {
         Ok((cone, updates))
     }
 
+    // Reuse a known composition or search and cache a new scale pair.
     fn find_candidate(
         &self,
         environment: &LutCircuit,
@@ -802,24 +940,24 @@ impl Mapper {
         }
 
         if self.config.multioutput_fbs {
-            return self.search_candidate(environment, left, right, xy, truth_table, false);
+            return self.search_candidate(environment, left, right, xy, truth_table);
         }
 
         let key = CandidateCacheKey {
             truth_table: truth_table.to_vec(),
-            first_basis: xy.iter().map(|pair| pair.0).collect(),
-            second_basis: xy.iter().map(|pair| pair.1).collect(),
+            basis: xy.to_vec(),
         };
         if let Some(scales) = cache.get(&key) {
             return scales
                 .and_then(|scales| self.make_candidate(left, right, xy, truth_table, scales));
         }
-        let candidate = self.search_candidate(environment, left, right, xy, truth_table, true);
+        let candidate = self.search_candidate(environment, left, right, xy, truth_table);
         let cached_scales = candidate.as_ref().map(|candidate| candidate.scales);
         cache.insert(key, cached_scales);
         candidate
     }
 
+    // Search primitive scale pairs and retain the best valid heuristic score.
     fn search_candidate(
         &self,
         environment: &LutCircuit,
@@ -827,12 +965,10 @@ impl Mapper {
         right: &Cone,
         xy: &[(i64, i64)],
         truth_table: &[u8],
-        python_rules: bool,
     ) -> Option<Candidate> {
         let left_size = left.span() as i64;
         let right_size = right.span() as i64;
-        let left_is_zero = xy.iter().all(|(left, _)| *left == 0);
-        let right_is_zero = xy.iter().all(|(_, right)| *right == 0);
+
         let rows = compact_candidate_rows(
             xy,
             truth_table,
@@ -841,7 +977,7 @@ impl Mapper {
                 (*right.multivalue_table.iter().min()?, right_size as usize),
             ],
         )?;
-        let mut best: Option<(CandidateScore, (i64, i64))> = None;
+        let mut best: Option<(Score, (i64, i64))> = None;
         let moments = EnergyMoments::new(&rows);
         let mut workspace = CandidateWorkspace::new(left, right);
         let mut bootstrap_lookup = if self.config.multioutput_fbs {
@@ -856,54 +992,42 @@ impl Mapper {
         };
         let independent_basis = workspace.independent_basis();
         let mut seen_coefficients = HashSet::new();
-        let (a_minimum, b_minimum) = if python_rules && left_size >= right_size {
-            (-right_size, 0)
-        } else {
-            (0, -left_size)
-        };
-        for a in a_minimum..=right_size {
-            for b in b_minimum..=left_size {
-                if !python_rules
-                    && !is_candidate_scale_pair(a, b, left_is_zero, right_is_zero, false)
-                {
+        for a in 0..=right_size {
+            for b in -left_size..=left_size {
+                if !is_candidate_scale_pair(a, b) {
                     continue;
                 }
+                let Some(divisor) = workspace.prepare_coefficients((a, b)) else {
+                    continue;
+                };
                 // Primitive scale pairs are already unique on independent bases.
-                if !python_rules && !independent_basis {
-                    let mut coefficient_key: Vec<_> = workspace
-                        .coefficient_basis
-                        .iter()
-                        .map(|(left, right)| a * left + b * right)
-                        .collect();
-                    normalize_coefficient_key(&mut coefficient_key, false);
-                    if !seen_coefficients.insert(coefficient_key) {
-                        continue;
-                    }
+                if !independent_basis && !seen_coefficients.insert(workspace.coefficients.clone()) {
+                    continue;
                 }
-                let coefficient_bound = a.unsigned_abs() as u128 * (left_size - 1) as u128
-                    + b.unsigned_abs() as u128 * (right_size - 1) as u128;
-                // A larger bound can still win by reuse until the best reuse cost is zero.
-                if best.as_ref().is_some_and(|(score, _)| {
-                    (!self.config.multioutput_fbs || score.0 == 0) && coefficient_bound > score.1
+                let divisor_squared = (divisor.unsigned_abs() as u128).checked_pow(2)?;
+                let energy = candidate_energy(&rows, moments.as_ref(), (a, b))?
+                    .checked_div(divisor_squared)?;
+                let Some(score) = workspace.evaluate_prepared(
+                    self,
+                    rows.iter().copied(),
+                    (a, b),
+                    divisor,
+                    energy,
+                    |minimum| {
+                        u8::from(!bootstrap_lookup.as_mut().is_some_and(|lookup| {
+                            lookup.has_bootstrap(environment, (a, b), divisor, -minimum)
+                        }))
+                    },
+                ) else {
+                    continue;
+                };
+                // A larger span can still win by reuse until the best reuse cost is zero.
+                if best.as_ref().is_some_and(|(best_score, _)| {
+                    (!self.config.multioutput_fbs || best_score.reuse_cost == 0)
+                        && score.span > best_score.span
                 }) {
                     continue;
                 }
-                let Some((merged_norm2, minimum)) =
-                    workspace.evaluate(self, rows.iter().copied(), (a, b))
-                else {
-                    continue;
-                };
-                let energy = candidate_energy(&rows, moments.as_ref(), (a, b))?;
-                let reuse_cost = u8::from(
-                    !bootstrap_lookup
-                        .as_mut()
-                        .is_some_and(|lookup| lookup.has_bootstrap(environment, (a, b), -minimum)),
-                );
-                let score = if python_rules {
-                    (reuse_cost, coefficient_bound, energy, 0, -a, -b)
-                } else {
-                    (reuse_cost, coefficient_bound, energy, merged_norm2, a, b)
-                };
                 if best
                     .as_ref()
                     .is_none_or(|(best_score, _)| score < *best_score)
@@ -912,15 +1036,10 @@ impl Mapper {
                 }
             }
         }
-        best.map(|(_, scales)| Candidate {
-            scales,
-            multivalue_table: xy
-                .iter()
-                .map(|(x, y)| scales.0 * x + scales.1 * y)
-                .collect(),
-        })
+        best.and_then(|(_, scales)| self.make_candidate(left, right, xy, truth_table, scales))
     }
 
+    // Materialize the normalized coefficients and values for selected scales.
     fn make_candidate(
         &self,
         left: &Cone,
@@ -933,16 +1052,25 @@ impl Mapper {
             return None;
         }
         let mut workspace = CandidateWorkspace::new(left, right);
-        workspace.evaluate(self, candidate_rows(xy, truth_table), scales)?;
+        let (_, divisor) = workspace.evaluate(self, candidate_rows(xy, truth_table), scales)?;
+        let multivalue_table = xy
+            .iter()
+            .map(|(x, y)| {
+                scales
+                    .0
+                    .checked_mul(*x)?
+                    .checked_add(scales.1.checked_mul(*y)?)?
+                    .checked_div(divisor)
+            })
+            .collect::<Option<_>>()?;
         Some(Candidate {
             scales,
-            multivalue_table: xy
-                .iter()
-                .map(|(x, y)| scales.0 * x + scales.1 * y)
-                .collect(),
+            coefficients: workspace.coefficients,
+            multivalue_table,
         })
     }
 
+    // Merge a selected candidate into a simplified output cone.
     fn merge_cones(
         &self,
         left: Cone,
@@ -951,11 +1079,10 @@ impl Mapper {
         truth_table: Vec<u8>,
     ) -> Result<Cone, String> {
         let support = union_support(&left.support, &right.support);
-        let coefficients =
-            combined_coefficients_for_support(&left, &right, candidate.scales, &support);
+        debug_assert_eq!(support.len(), candidate.coefficients.len());
         let cone = simplify_cone(Cone {
             support,
-            coefficients,
+            coefficients: candidate.coefficients,
             truth_table,
             multivalue_table: candidate.multivalue_table,
         })?;
@@ -963,6 +1090,7 @@ impl Mapper {
         Ok(cone)
     }
 
+    // Find a reusable coefficient form equivalent to the requested cone.
     fn reusable_cone_coefficients(
         &self,
         environment: &LutCircuit,
@@ -993,16 +1121,18 @@ impl Mapper {
         best.map(|(_, coefficients)| coefficients)
     }
 
+    // Emit a bootstrap for a cone and replace it with an identity cone.
     fn bootstrap_cone(&self, environment: &mut LutCircuit, mut cone: Cone) -> Result<Cone, String> {
         if cone.support.len() <= 1 {
-            self.info_cone(format_args!("bootstrap skipped"), &cone);
+            self.trace_cone(format_args!("bootstrap skipped"), &cone);
             return Ok(cone);
         }
-        self.info_cone(format_args!("bootstrap input"), &cone);
+        self.trace_cone(format_args!("bootstrap input"), &cone);
         if let Some(coefficients) = self.reusable_cone_coefficients(environment, &cone) {
-            self.info(format_args!(
+            log::debug!(
+                target: "mapper",
                 "bootstrap realign coefficients={coefficients:?}"
-            ));
+            );
             cone.multivalue_table = linear_table(&coefficients);
             cone.coefficients = coefficients;
             self.validate_cone(&cone)?;
@@ -1019,16 +1149,18 @@ impl Mapper {
             .collect();
         let linear = environment.linear(&terms, -minimum);
         let table = self.bootstrap_table(&cone.truth_table, &cone.multivalue_table)?;
-        self.info(format_args!(
+        log::trace!(
+            target: "mapper",
             "bootstrap materialize linear={linear:?} table={table:?}"
-        ));
+        );
         let LutSignal::Node(node) = environment.bootstrap(linear, table)? else {
             return Err("non-constant cone unexpectedly bootstrapped to a constant".to_owned());
         };
-        self.info(format_args!("bootstrap result node={node}"));
+        log::debug!(target: "mapper", "bootstrap result node={node}");
         Ok(Cone::identity(node))
     }
 
+    // Convert a final cone to a constant, node, or linear output signal.
     fn output_signal(&self, environment: &mut LutCircuit, cone: Cone) -> Result<LutSignal, String> {
         match cone.support.as_slice() {
             [] => Ok(LutSignal::Const(i64::from(cone.truth_table[0]))),
@@ -1039,13 +1171,14 @@ impl Mapper {
                 table => Err(format!("unexpected one-input output table {table:?}")),
             },
             _ => {
-                self.info(format_args!("bootstrap reason=output-materialization"));
+                log::debug!(target: "mapper", "bootstrap reason=output-materialization");
                 let bootstrapped = self.bootstrap_cone(environment, cone)?;
                 self.output_signal(environment, bootstrapped)
             }
         }
     }
 
+    // Check structural consistency and configured cone complexity limits.
     fn validate_cone(&self, cone: &Cone) -> Result<(), String> {
         let expected = 1usize
             .checked_shl(cone.support.len() as u32)
@@ -1072,10 +1205,12 @@ impl Mapper {
         Ok(())
     }
 
+    // Test whether a full multivalue table admits the requested Boolean LUT.
     fn is_lut_valid(&self, truth_table: &[u8], multivalue_table: &[i64]) -> bool {
         self.is_lut_valid_with_scratch(truth_table, multivalue_table, &mut Vec::new())
     }
 
+    // Validate a LUT using caller-provided scratch storage.
     fn is_lut_valid_with_scratch(
         &self,
         truth_table: &[u8],
@@ -1109,6 +1244,7 @@ impl Mapper {
         self.is_known_lut_valid(known)
     }
 
+    // Test whether known sparse LUT entries admit a valid completion.
     fn is_known_lut_valid(&self, known: &[u8]) -> bool {
         let size = known.len();
         if size <= self.config.fbs_size {
@@ -1129,6 +1265,7 @@ impl Mapper {
         antipodal || all_zero || all_one
     }
 
+    // Build the bootstrap table for one cone truth table.
     fn bootstrap_table(
         &self,
         truth_table: &[u8],
@@ -1138,6 +1275,7 @@ impl Mapper {
             .ok_or_else(|| "cannot build a valid FBS test vector".to_owned())
     }
 
+    // Build a bootstrap table for a binary composition of two cones.
     fn composed_bootstrap_table(
         &self,
         truth_table: &[u8],
@@ -1182,6 +1320,7 @@ impl Mapper {
         self.is_test_vector_valid(&table).then_some(table)
     }
 
+    // Check one completed lookup table against negacyclic FBS constraints.
     fn is_test_vector_valid(&self, table: &[u8]) -> bool {
         if table.len() <= self.config.fbs_size {
             return true;
@@ -1198,6 +1337,7 @@ impl Mapper {
     }
 }
 
+// Return a readable source name for a Boolean wire.
 fn bool_wire_name(circuit: &BoolCircuit, wire: BoolWire) -> String {
     match wire {
         BoolWire::Const(value) => u8::from(value).to_string(),
@@ -1212,10 +1352,12 @@ impl Cone {
     }
 }
 
+// Rank cones by span and coefficient norm for deterministic input ordering.
 fn cone_order_key(cone: &Cone) -> (usize, u128) {
     (cone.span(), cone.norm2())
 }
 
+// Swap binary inputs, positions, and truth-table axes together.
 fn switch_inputs(
     left: &mut Cone,
     right: &mut Cone,
@@ -1228,16 +1370,19 @@ fn switch_inputs(
     gate_table.swap(1, 2);
 }
 
+// Count the sorted union of two cone supports without allocating it.
 fn union_support_size(left: &[usize], right: &[usize]) -> usize {
     left.len() + right.iter().filter(|node| !left.contains(node)).count()
 }
 
+// Return the sorted union of two cone supports.
 fn union_support(left: &[usize], right: &[usize]) -> Vec<usize> {
     let mut support = left.to_vec();
     support.extend(right.iter().filter(|node| !left.contains(node)).copied());
     support
 }
 
+// Expand two cone value tables and a binary gate into aligned rows.
 fn cone_composition_tables(
     left: &Cone,
     right: &Cone,
@@ -1277,6 +1422,7 @@ fn cone_composition_tables(
     Ok((xy, truth_table))
 }
 
+#[cfg(test)]
 fn combined_coefficients_for_support(
     left: &Cone,
     right: &Cone,
@@ -1292,6 +1438,7 @@ fn combined_coefficients_for_support(
         .collect()
 }
 
+// Return both input-cone coefficients for one support node.
 fn coefficient_pair(left: &Cone, right: &Cone, node: usize) -> (i64, i64) {
     let coefficient = |cone: &Cone| {
         cone.support
@@ -1303,6 +1450,7 @@ fn coefficient_pair(left: &Cone, right: &Cone, node: usize) -> (i64, i64) {
     (coefficient(left), coefficient(right))
 }
 
+// Remove unused variables and canonicalize a validated cone's linear form.
 fn simplify_cone(mut cone: Cone) -> Result<Cone, String> {
     let old_support_len = cone.support.len();
     let retained: Vec<_> = cone
@@ -1344,12 +1492,8 @@ fn simplify_cone(mut cone: Cone) -> Result<Cone, String> {
     }
 
     if !cone.coefficients.is_empty() {
-        let divisor = cone
-            .coefficients
-            .iter()
-            .fold(0i64, |gcd, value| gcd_i64(gcd, *value));
-        let divisor = divisor.abs().max(1);
-        if divisor > 1 {
+        let divisor = coefficient_normalization_divisor(&cone.coefficients);
+        if divisor != 1 {
             for coefficient in &mut cone.coefficients {
                 *coefficient /= divisor;
             }
@@ -1361,6 +1505,7 @@ fn simplify_cone(mut cone: Cone) -> Result<Cone, String> {
     Ok(cone)
 }
 
+// Enumerate a linear form over all Boolean support assignments.
 fn linear_table(coefficients: &[i64]) -> Vec<i64> {
     let count = 1usize << coefficients.len();
     let mut table = Vec::with_capacity(count);
@@ -1374,38 +1519,29 @@ fn linear_table(coefficients: &[i64]) -> Vec<i64> {
     table
 }
 
-fn is_candidate_scale_pair(
-    first: i64,
-    second: i64,
-    first_basis_is_zero: bool,
-    second_basis_is_zero: bool,
-    canonical_sign: bool,
-) -> bool {
-    !(first_basis_is_zero && first != 0 || second_basis_is_zero && second != 0)
-        && (!canonical_sign || first > 0 || (first == 0 && second > 0))
-        && gcd_i64(first, second) == 1
+// Keep only primitive scale pairs with a canonical global sign.
+fn is_candidate_scale_pair(first: i64, second: i64) -> bool {
+    (first > 0 || (first == 0 && second > 0)) && gcd_i64(first, second) == 1
 }
 
-fn normalize_coefficient_key(coefficients: &mut [i64], canonical_sign: bool) {
+// Return a signed GCD that makes the first nonzero coefficient positive.
+fn coefficient_normalization_divisor(coefficients: &[i64]) -> i64 {
     let divisor = coefficients
         .iter()
         .fold(0i64, |divisor, coefficient| gcd_i64(divisor, *coefficient))
         .max(1);
-    for coefficient in &mut *coefficients {
-        *coefficient /= divisor;
-    }
-    if canonical_sign
-        && coefficients
-            .iter()
-            .find(|coefficient| **coefficient != 0)
-            .is_some_and(|coefficient| *coefficient < 0)
+    if coefficients
+        .iter()
+        .find(|coefficient| **coefficient != 0)
+        .is_some_and(|coefficient| *coefficient < 0)
     {
-        for coefficient in coefficients {
-            *coefficient = -*coefficient;
-        }
+        -divisor
+    } else {
+        divisor
     }
 }
 
+// Return the nonnegative greatest common divisor of two coefficients.
 fn gcd_i64(mut left: i64, mut right: i64) -> i64 {
     while right != 0 {
         let remainder = left % right;
@@ -1415,6 +1551,7 @@ fn gcd_i64(mut left: i64, mut right: i64) -> i64 {
     left.abs()
 }
 
+// Return the inclusive integer range covered by a value table.
 fn table_span(table: &[i64]) -> usize {
     let minimum = *table.iter().min().unwrap();
     let maximum = *table.iter().max().unwrap();
@@ -1422,6 +1559,7 @@ fn table_span(table: &[i64]) -> usize {
 }
 
 #[cfg(test)]
+// Return the sum of squared values in a table.
 fn raw_energy(table: &[i64]) -> u128 {
     table
         .iter()
@@ -1432,6 +1570,7 @@ fn raw_energy(table: &[i64]) -> u128 {
         .sum()
 }
 
+// Return the sum of squared linear-form coefficients.
 fn coefficients_norm2(coefficients: &[i64]) -> u128 {
     coefficients
         .iter()
@@ -1442,10 +1581,12 @@ fn coefficients_norm2(coefficients: &[i64]) -> u128 {
         .sum()
 }
 
+// Test whether every value in a slice equals the first one.
 fn all_equal<T: PartialEq>(values: &[T]) -> bool {
     values.windows(2).all(|window| window[0] == window[1])
 }
 
+// Mix a seed into one deterministic pseudorandom 64-bit value.
 fn splitmix64(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -1481,6 +1622,55 @@ mod tests {
                 "inputs: {inputs:?}"
             );
         }
+    }
+
+    #[test]
+    fn score_order_matches_candidate_ranking() {
+        let score = Score {
+            reuse_cost: 1,
+            span: 1,
+            energy: 1,
+            norm2: 1,
+            a: 1,
+            b: 1,
+        };
+
+        assert!(
+            Score {
+                reuse_cost: 0,
+                span: 2,
+                ..score
+            } < score
+        );
+        assert!(
+            Score {
+                span: 0,
+                energy: 2,
+                ..score
+            } < score
+        );
+        assert!(
+            Score {
+                energy: 0,
+                norm2: 2,
+                ..score
+            } < score
+        );
+        assert!(
+            Score {
+                norm2: 0,
+                a: 2,
+                ..score
+            } < score
+        );
+        assert!(
+            Score {
+                a: 0,
+                b: 2,
+                ..score
+            } < score
+        );
+        assert!(Score { b: 0, ..score } < score);
     }
 
     #[test]
@@ -1544,6 +1734,39 @@ mod tests {
     }
 
     #[test]
+    fn binary_gate_with_constant_input_dispatches_to_unary() {
+        let mapper = Mapper::new(MapConfig::default()).unwrap();
+        let mut environment = LutCircuit::default();
+        let mut candidate_cache = CandidateCache::new();
+        let gate_table = [0, 1, 0, 0];
+
+        let (left_constant, updates) = mapper
+            .map_gate(
+                &mut environment,
+                vec![Cone::constant(0), Cone::identity(7)],
+                &gate_table,
+                &mut candidate_cache,
+            )
+            .unwrap();
+        assert_eq!(left_constant.support, vec![7]);
+        assert_eq!(left_constant.truth_table, vec![0, 1]);
+        assert!(updates.iter().all(Option::is_none));
+
+        let (right_constant, updates) = mapper
+            .map_gate(
+                &mut environment,
+                vec![Cone::identity(7), Cone::constant(1)],
+                &gate_table,
+                &mut candidate_cache,
+            )
+            .unwrap();
+        assert_eq!(right_constant.support, vec![7]);
+        assert_eq!(right_constant.truth_table, vec![1, 0]);
+        assert!(updates.iter().all(Option::is_none));
+        assert!(candidate_cache.is_empty());
+    }
+
+    #[test]
     fn fused_candidate_evaluation_matches_full_table_reference() {
         let cone = |support: Vec<usize>, coefficients: Vec<i64>, truth_table: Vec<u8>| Cone {
             multivalue_table: linear_table(&coefficients),
@@ -1604,16 +1827,38 @@ mod tests {
                                 for b in -3..=3 {
                                     let values: Vec<_> =
                                         xy.iter().map(|(x, y)| a * x + b * y).collect();
-                                    let coefficients = combined_coefficients_for_support(
+                                    let mut coefficients = combined_coefficients_for_support(
                                         left,
                                         right,
                                         (a, b),
                                         &support,
                                     );
+                                    let divisor = coefficient_normalization_divisor(&coefficients);
+                                    for coefficient in &mut coefficients {
+                                        *coefficient /= divisor;
+                                    }
+                                    let values: Vec<_> =
+                                        values.into_iter().map(|value| value / divisor).collect();
+                                    let span = 1 + coefficients
+                                        .iter()
+                                        .map(|coefficient| coefficient.unsigned_abs() as u128)
+                                        .sum::<u128>();
                                     let norm2 = coefficients_norm2(&coefficients);
                                     let expected = (mapper.is_lut_valid(&truth, &values)
                                         && max_norm2.is_none_or(|limit| norm2 <= limit))
-                                    .then(|| (norm2, *values.iter().min().unwrap()));
+                                    .then(|| {
+                                        (
+                                            Score {
+                                                reuse_cost: 1,
+                                                span,
+                                                energy: raw_energy(&values),
+                                                norm2,
+                                                a,
+                                                b,
+                                            },
+                                            divisor,
+                                        )
+                                    });
                                     let actual = workspace.evaluate(
                                         &mapper,
                                         candidate_rows(&xy, &truth),
@@ -1634,12 +1879,15 @@ mod tests {
                                     );
                                     if actual.is_some() {
                                         assert_eq!(
-                                            candidate_energy(&rows, moments.as_ref(), (a, b)),
+                                            candidate_energy(&rows, moments.as_ref(), (a, b))
+                                                .map(|energy| energy
+                                                    / (divisor.unsigned_abs() as u128).pow(2)),
                                             Some(raw_energy(&values))
                                         );
                                         let candidate = mapper
                                             .make_candidate(left, right, &xy, &truth, (a, b))
                                             .unwrap();
+                                        assert_eq!(candidate.coefficients, coefficients);
                                         assert_eq!(candidate.multivalue_table, values);
                                     }
                                 }
@@ -1743,43 +1991,25 @@ mod tests {
             truth: &[u8],
         ) -> Option<(i64, i64)> {
             let support = union_support(&left.support, &right.support);
-            let canonical_sign = !mapper.config.multioutput_fbs;
             let independent = CandidateWorkspace::new(left, right).independent_basis();
             let mut seen = HashSet::new();
-            let mut best: Option<(CandidateScore, (i64, i64))> = None;
-            let a_minimum = if canonical_sign && left.span() >= right.span() {
-                -(right.span() as i64)
-            } else {
-                0
-            };
-            let b_minimum = if canonical_sign && left.span() >= right.span() {
-                0
-            } else {
-                -(left.span() as i64)
-            };
-            for a in a_minimum..=right.span() as i64 {
-                for b in b_minimum..=left.span() as i64 {
-                    if !canonical_sign
-                        && !is_candidate_scale_pair(
-                            a,
-                            b,
-                            xy.iter().all(|pair| pair.0 == 0),
-                            xy.iter().all(|pair| pair.1 == 0),
-                            false,
-                        )
-                    {
+            let mut best: Option<(Score, (i64, i64))> = None;
+            for a in 0..=right.span() as i64 {
+                for b in -(left.span() as i64)..=left.span() as i64 {
+                    if !is_candidate_scale_pair(a, b) {
                         continue;
                     }
-                    let coefficients =
+                    let mut coefficients =
                         combined_coefficients_for_support(left, right, (a, b), &support);
-                    if !canonical_sign && !independent {
-                        let mut key = coefficients.clone();
-                        normalize_coefficient_key(&mut key, false);
-                        if !seen.insert(key) {
-                            continue;
-                        }
+                    let divisor = coefficient_normalization_divisor(&coefficients);
+                    for coefficient in &mut coefficients {
+                        *coefficient /= divisor;
                     }
-                    let values: Vec<_> = xy.iter().map(|&(x, y)| a * x + b * y).collect();
+                    if !independent && !seen.insert(coefficients.clone()) {
+                        continue;
+                    }
+                    let values: Vec<_> =
+                        xy.iter().map(|&(x, y)| (a * x + b * y) / divisor).collect();
                     let norm2 = coefficients_norm2(&coefficients);
                     if !mapper.is_lut_valid(truth, &values)
                         || mapper.config.max_norm2.is_some_and(|limit| norm2 > limit)
@@ -1801,12 +2031,17 @@ mod tests {
                     } else {
                         false
                     };
-                    let bound = a.unsigned_abs() as u128 * (left.span() - 1) as u128
-                        + b.unsigned_abs() as u128 * (right.span() - 1) as u128;
-                    let score = if canonical_sign {
-                        (u8::from(!reuse), bound, raw_energy(&values), 0, -a, -b)
-                    } else {
-                        (u8::from(!reuse), bound, raw_energy(&values), norm2, a, b)
+                    let span = 1 + coefficients
+                        .iter()
+                        .map(|coefficient| coefficient.unsigned_abs() as u128)
+                        .sum::<u128>();
+                    let score = Score {
+                        reuse_cost: u8::from(!reuse),
+                        span,
+                        energy: raw_energy(&values),
+                        norm2,
+                        a,
+                        b,
                     };
                     if best.as_ref().is_none_or(|(previous, _)| score < *previous) {
                         best = Some((score, (a, b)));
@@ -1858,7 +2093,7 @@ mod tests {
                 let (xy, truth) = cone_composition_tables(left, right, &[0, 0, 0, 1]).unwrap();
                 assert_eq!(
                     mapper
-                        .search_candidate(&environment, left, right, &xy, &truth, false)
+                        .search_candidate(&environment, left, right, &xy, &truth)
                         .unwrap()
                         .scales,
                     (2, 1)
@@ -1890,7 +2125,6 @@ mod tests {
                                                 right,
                                                 &xy,
                                                 &truth,
-                                                !multioutput_fbs
                                             )
                                             .map(|candidate| candidate.scales),
                                         reference(&mapper, &environment, left, right, &xy, &truth),
@@ -1903,6 +2137,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn simplifies_and_canonicalizes_candidates_before_validation() {
+        let left = Cone {
+            support: vec![0, 1],
+            coefficients: vec![1, 1],
+            truth_table: vec![0, 0, 0, 1],
+            multivalue_table: vec![0, 1, 1, 2],
+        };
+        let right = Cone {
+            support: vec![0, 1],
+            coefficients: vec![1, -1],
+            truth_table: vec![0, 0, 1, 0],
+            multivalue_table: vec![0, -1, 1, 0],
+        };
+        let mapper = Mapper::new(MapConfig {
+            fbs_size: 2,
+            max_fbs_size: 2,
+            ..MapConfig::default()
+        })
+        .unwrap();
+        let (xy, truth) = cone_composition_tables(&left, &right, &[0, 1, 1, 1]).unwrap();
+
+        for scales in [(1, 1), (-1, -1)] {
+            let candidate = mapper
+                .make_candidate(&left, &right, &xy, &truth, scales)
+                .unwrap();
+            assert_eq!(candidate.coefficients, [1, 0]);
+            assert_eq!(candidate.multivalue_table, [0, 0, 1, 1]);
+        }
+
+        let candidate = mapper
+            .make_candidate(&left, &right, &xy, &truth, (-1, -1))
+            .unwrap();
+        let cone = mapper.merge_cones(left, right, candidate, truth).unwrap();
+        assert_eq!(cone.support, [0]);
+        assert_eq!(cone.coefficients, [1]);
+        assert_eq!(cone.multivalue_table, [0, 1]);
+    }
+
+    #[test]
+    fn search_scores_merged_span_after_shared_variable_cancellation() {
+        let left = Cone {
+            support: vec![0, 1],
+            coefficients: vec![1, 1],
+            truth_table: vec![0, 1, 1, 0],
+            multivalue_table: vec![0, 1, 1, 2],
+        };
+        let right = Cone {
+            support: vec![1, 2],
+            coefficients: vec![1, 1],
+            truth_table: vec![0, 1, 1, 0],
+            multivalue_table: vec![0, 1, 1, 2],
+        };
+        let mapper = Mapper::new(MapConfig {
+            fbs_size: 4,
+            max_fbs_size: 8,
+            ..MapConfig::default()
+        })
+        .unwrap();
+        let (xy, truth) = cone_composition_tables(&left, &right, &[0, 1, 1, 0]).unwrap();
+
+        let candidate = mapper
+            .search_candidate(&LutCircuit::default(), &left, &right, &xy, &truth)
+            .unwrap();
+        assert_eq!(candidate.scales, (1, -1));
+        assert_eq!(candidate.coefficients, [1, 0, -1]);
     }
 
     #[test]
@@ -1920,7 +2222,17 @@ mod tests {
         assert!(workspace.known.is_empty());
         assert_eq!(
             workspace.evaluate(&mapper, candidate_rows(&xy, &truth), (2, 1)),
-            Some((5, 0))
+            Some((
+                Score {
+                    reuse_cost: 1,
+                    span: 4,
+                    energy: 14,
+                    norm2: 5,
+                    a: 2,
+                    b: 1,
+                },
+                1,
+            ))
         );
         assert_eq!(workspace.known, [0, 0, 0, 1]);
         assert!(
@@ -1981,18 +2293,21 @@ mod tests {
             })
             .unwrap();
             let candidate = mapper
-                .search_candidate(&environment, &left, &right, &xy, &truth, !multioutput_fbs)
+                .search_candidate(&environment, &left, &right, &xy, &truth)
                 .unwrap();
             assert_eq!(
                 candidate.multivalue_table,
-                xy.iter()
-                    .map(|(x, y)| candidate.scales.0 * x + candidate.scales.1 * y)
-                    .collect::<Vec<_>>()
+                linear_table(&candidate.coefficients)
             );
             assert_eq!(candidate.multivalue_table.len(), xy.len());
             let moments = EnergyMoments::new(&rows).unwrap();
+            let support = union_support(&left.support, &right.support);
+            let raw_coefficients =
+                combined_coefficients_for_support(&left, &right, candidate.scales, &support);
+            let divisor = coefficient_normalization_divisor(&raw_coefficients);
             assert_eq!(
-                candidate_energy(&rows, Some(&moments), candidate.scales),
+                candidate_energy(&rows, Some(&moments), candidate.scales)
+                    .map(|energy| energy / (divisor.unsigned_abs() as u128).pow(2)),
                 Some(raw_energy(&candidate.multivalue_table))
             );
         }
@@ -2356,13 +2671,12 @@ mod tests {
 
     #[test]
     fn candidate_scale_filter_removes_projective_symmetries() {
-        assert!(is_candidate_scale_pair(1, -2, false, false, true));
-        assert!(is_candidate_scale_pair(0, 1, false, false, true));
-        assert!(!is_candidate_scale_pair(0, -1, false, false, true));
-        assert!(is_candidate_scale_pair(0, -1, false, false, false));
-        assert!(!is_candidate_scale_pair(2, 2, false, false, true));
-        assert!(!is_candidate_scale_pair(1, 0, true, false, true));
-        assert!(!is_candidate_scale_pair(1, 1, false, true, true));
+        assert!(is_candidate_scale_pair(1, -2));
+        assert!(is_candidate_scale_pair(1, 0));
+        assert!(is_candidate_scale_pair(0, 1));
+        assert!(!is_candidate_scale_pair(0, -1));
+        assert!(!is_candidate_scale_pair(2, 2));
+        assert!(!is_candidate_scale_pair(0, 0));
     }
 
     #[test]
@@ -2374,22 +2688,24 @@ mod tests {
         ] {
             let workspace = CandidateWorkspace {
                 coefficient_basis: basis,
+                coefficients: Vec::new(),
                 known: Vec::new(),
             };
             assert!(workspace.independent_basis());
-            for canonical_sign in [false, true] {
-                let mut seen = HashSet::new();
-                for a in 0..=8 {
-                    for b in -8..=8 {
-                        if is_candidate_scale_pair(a, b, false, false, canonical_sign) {
-                            let mut key: Vec<_> = workspace
-                                .coefficient_basis
-                                .iter()
-                                .map(|(left, right)| a * left + b * right)
-                                .collect();
-                            normalize_coefficient_key(&mut key, canonical_sign);
-                            assert!(seen.insert(key), "duplicate scales ({a}, {b})");
+            let mut seen = HashSet::new();
+            for a in 0..=8 {
+                for b in -8..=8 {
+                    if is_candidate_scale_pair(a, b) {
+                        let mut key: Vec<_> = workspace
+                            .coefficient_basis
+                            .iter()
+                            .map(|(left, right)| a * left + b * right)
+                            .collect();
+                        let divisor = coefficient_normalization_divisor(&key);
+                        for coefficient in &mut key {
+                            *coefficient /= divisor;
                         }
+                        assert!(seen.insert(key), "duplicate scales ({a}, {b})");
                     }
                 }
             }
@@ -2403,6 +2719,7 @@ mod tests {
             assert!(
                 !CandidateWorkspace {
                     coefficient_basis: basis,
+                    coefficients: Vec::new(),
                     known: Vec::new(),
                 }
                 .independent_basis()
