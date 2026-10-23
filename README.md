@@ -40,10 +40,10 @@ up to `2p` entries; `--strict-fbs-size` limits them to `p`. The `basic` policy
 uses per-gate LUTs and does not enforce these composition-size limits. Run
 `target/release/fbs-map --help` for all controls.
 
-`--trials N` runs the selected mapper first with the topological order encoded
-in the circuit, then with `N - 1` deterministic random topological orders
-derived from `--seed`. The best mapping is retained and total mapping time is
-reported.
+The mapper runs once with the topological order encoded in the circuit.
+`--trials N` adds `N` deterministic random topological orders derived from
+`--seed`; `--exclude-input-order` skips the input-order run. The best mapping is
+retained and total mapping time is reported.
 
 > [!NOTE]
 > Multi-output FBS support, inspired by [CIM19](https://eprint.iacr.org/2018/622), is experimental.

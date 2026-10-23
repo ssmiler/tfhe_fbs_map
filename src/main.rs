@@ -62,6 +62,7 @@ struct Arguments {
     max_tt_size: usize,
     max_norm2: Option<u128>,
     trials: usize,
+    exclude_input_order: bool,
     seed: u64,
     verify_samples: usize,
     multioutput_fbs: bool,
@@ -111,15 +112,20 @@ fn run() -> Result<(), String> {
         multioutput_fbs: arguments.multioutput_fbs,
     };
 
+    let include_input_order = !arguments.exclude_input_order;
+    let mapping_count = arguments
+        .trials
+        .checked_add(usize::from(include_input_order))
+        .ok_or_else(|| "too many mapping trials".to_owned())?;
     let mut best = None;
     let mut total_duration = 0.0;
-    for trial in 0..arguments.trials {
-        let schedule_policy = trial_schedule(trial, arguments.seed);
+    for trial in 0..mapping_count {
+        let schedule_policy = trial_schedule(trial, arguments.seed, include_input_order);
         log::info!(
             target: "mapper",
             "trial {}/{} schedule={schedule_policy:?}",
             trial + 1,
-            arguments.trials
+            mapping_count
         );
         let mapper = Mapper::new(MapConfig {
             schedule_policy,
@@ -136,7 +142,7 @@ fn run() -> Result<(), String> {
                 target: "mapper",
                 "trial {}/{} result={:?} selected={replace_best}",
                 trial + 1,
-                arguments.trials,
+                mapping_count,
                 mapped.stats()
             );
         }
@@ -166,7 +172,7 @@ fn run() -> Result<(), String> {
         "{{'nb_inp': {}, 'nb_linprod': {}, 'nb_bootstrap': {}, 'max_lut_size': {}, \
          'norm2_linprod': {}, 'nb_out': {}, 'filename': '{}', 'fbs_size': {}, \
          'mapper': '{}', 'multioutput_fbs': {}, 'strict_fbs_size': {}, 'max_tt_size': {}, 'max_fbs_size': {}, \
-         'max_norm2': {}, 'trials': {}, 'time': {:.9}}}",
+         'max_norm2': {}, 'trials': {}, 'exclude_input_order': {}, 'time': {:.9}}}",
         stats.input_count,
         stats.linear_count,
         stats.bootstrap_count,
@@ -185,6 +191,7 @@ fn run() -> Result<(), String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "None".to_owned()),
         arguments.trials,
+        python_bool(arguments.exclude_input_order),
         total_duration,
     );
     Ok(())
@@ -212,13 +219,13 @@ fn parse_file(path: impl AsRef<Path>, input_type: &str) -> Result<BoolCircuit, S
     circuit.map_err(|error| format!("{}: {error}", path.display()))
 }
 
-// Use the original schedule first and deterministic random schedules afterward.
-fn trial_schedule(trial: usize, seed: u64) -> SchedulePolicy {
-    if trial == 0 {
+// Use the input order first when enabled, then deterministic random orders.
+fn trial_schedule(trial: usize, seed: u64, include_input_order: bool) -> SchedulePolicy {
+    if include_input_order && trial == 0 {
         SchedulePolicy::Original
     } else {
         SchedulePolicy::Random {
-            seed: seed.wrapping_add((trial - 1) as u64),
+            seed: seed.wrapping_add((trial - usize::from(include_input_order)) as u64),
         }
     }
 }
@@ -237,7 +244,8 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
     let mut strict_fbs_size = false;
     let mut max_tt_size = 16usize;
     let mut max_norm2 = None;
-    let mut trials = 1usize;
+    let mut trials = 0usize;
+    let mut exclude_input_order = false;
     let mut seed = 42u64;
     let mut verify_samples = 1000usize;
     let mut multioutput_fbs = false;
@@ -261,6 +269,7 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
                 max_norm2 = Some(parse_value(&mut arguments, &argument)?)
             }
             "--trials" => trials = parse_value(&mut arguments, &argument)?,
+            "--exclude-input-order" | "--exclude_input_order" => exclude_input_order = true,
             "--seed" => seed = parse_value(&mut arguments, &argument)?,
             "--verify-samples" => verify_samples = parse_value(&mut arguments, &argument)?,
             "--multioutput-fbs" | "--multioutput_fbs" => multioutput_fbs = true,
@@ -293,8 +302,8 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
         }
     }
 
-    if trials == 0 {
-        return Err("--trials must be positive".to_owned());
+    if exclude_input_order && trials == 0 {
+        return Err("--exclude-input-order requires at least one random trial".to_owned());
     }
 
     Ok(Arguments {
@@ -306,6 +315,7 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
         max_tt_size,
         max_norm2,
         trials,
+        exclude_input_order,
         seed,
         verify_samples,
         multioutput_fbs,
@@ -350,7 +360,8 @@ Options:
   --strict-fbs-size        Disable the negacyclic extension from p to 2p
   --max-tt-size <N>        Maximum cone support before forced bootstrap (default: 16)
   --max-norm2 <N>          Maximum sum of squared linear-combination coefficients
-  --trials <N>             Original order once, then N-1 random orders (default: 1)
+  --trials <N>             Add N random-order mappings (default: 0)
+  --exclude-input-order    Skip the input-order mapping
   --seed <N>               Random-order and verification seed (default: 42)
   --verify-samples <N>     Random equivalence samples above 16 inputs (default: 1000)
   --multioutput-fbs        Group bootstrap outputs with the same linear input
@@ -432,10 +443,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trials_use_original_then_distinct_random_seeds() {
-        assert_eq!(trial_schedule(0, 42), SchedulePolicy::Original);
-        assert_eq!(trial_schedule(1, 42), SchedulePolicy::Random { seed: 42 });
-        assert_eq!(trial_schedule(2, 42), SchedulePolicy::Random { seed: 43 });
+    fn trials_use_input_order_then_distinct_random_seeds() {
+        assert_eq!(trial_schedule(0, 42, true), SchedulePolicy::Original);
+        assert_eq!(
+            trial_schedule(1, 42, true),
+            SchedulePolicy::Random { seed: 42 }
+        );
+        assert_eq!(
+            trial_schedule(2, 42, true),
+            SchedulePolicy::Random { seed: 43 }
+        );
+        assert_eq!(
+            trial_schedule(0, 42, false),
+            SchedulePolicy::Random { seed: 42 }
+        );
+        assert_eq!(
+            trial_schedule(1, 42, false),
+            SchedulePolicy::Random { seed: 43 }
+        );
+    }
+
+    #[test]
+    fn excluding_input_order_requires_a_random_trial() {
+        let error = parse_arguments_from(
+            ["--exclude-input-order", "circuit.blif"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "--exclude-input-order requires at least one random trial"
+        );
+
+        let arguments = parse_arguments_from(
+            ["--trials", "2", "--exclude-input-order", "circuit.blif"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(arguments.trials, 2);
+        assert!(arguments.exclude_input_order);
     }
 
     #[test]
