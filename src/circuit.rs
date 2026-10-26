@@ -126,6 +126,8 @@ impl BoolCircuit {
 
                     let signal = if input_names.is_empty() {
                         BoolWire::Const(table[0] != 0)
+                    } else if inputs.len() == 1 && table == [0, 1] {
+                        inputs[0]
                     } else {
                         let id = circuit.nodes.len();
                         circuit.nodes.push(BoolNode::Lut {
@@ -794,6 +796,35 @@ mod tests {
                 ("one".into(), true)
             ]
         );
+    }
+
+    #[test]
+    fn drops_blif_buffers_and_preserves_output_aliases() {
+        let source = ".inputs a b\n.outputs alias inverted result constant\n\
+            .names a first\n1 1\n\
+            .names first alias\n0 0\n\
+            .names alias inverted\n0 1\n\
+            .names alias b result\n11 1\n\
+            .names zero\n\
+            .names zero constant\n1 1\n";
+        let circuit = BoolCircuit::parse_blif(source).unwrap();
+        assert_eq!(circuit.nodes.len(), 4);
+        assert_eq!(circuit.outputs[0], ("alias".to_owned(), BoolWire::Node(0)));
+        assert_eq!(
+            circuit.outputs[3],
+            ("constant".to_owned(), BoolWire::Const(false))
+        );
+        for inputs in circuit.exhaustive_inputs().unwrap() {
+            assert_eq!(
+                circuit.evaluate(&inputs).unwrap(),
+                vec![
+                    ("alias".to_owned(), inputs["a"]),
+                    ("inverted".to_owned(), !inputs["a"]),
+                    ("result".to_owned(), inputs["a"] && inputs["b"]),
+                    ("constant".to_owned(), false),
+                ]
+            );
+        }
     }
 
     #[test]
