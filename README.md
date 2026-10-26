@@ -1,6 +1,12 @@
 # Heuristic for mapping Boolean circuits to TFHE functional bootstrapping
 
-This repository contains the code accompanying the paper *[A Fast Heuristic for Mapping Boolean Circuits to Functional Bootstrapping](https://eprint.iacr.org/2024/1204)*, together with its Rust implementation.
+This repository contains follow-up improvements to the code accompanying the paper *[A Fast Heuristic for Mapping Boolean Circuits to Functional Bootstrapping](https://eprint.iacr.org/2024/1204)*, including a Rust implementation.
+
+The version used for the paper is tagged `ches_2025`. To check it out, run:
+
+```bash
+git checkout ches_2025
+```
 
 ## Mapper
 
