@@ -1,6 +1,12 @@
 # Heuristic for mapping Boolean circuits to TFHE functional bootstrapping
 
-This repository contains the code accompanying the paper *[A Fast Heuristic for Mapping Boolean Circuits to Functional Bootstrapping](https://eprint.iacr.org/2024/1204)*, together with its Rust implementation.
+This repository contains follow-up improvements to the code accompanying the paper *[A Fast Heuristic for Mapping Boolean Circuits to Functional Bootstrapping](https://eprint.iacr.org/2024/1204)*, including a Rust implementation.
+
+The version used for the paper is tagged `ches_2025`. To check it out, run:
+
+```bash
+git checkout ches_2025
+```
 
 ## Mapper
 
@@ -40,10 +46,12 @@ up to `2p` entries; `--strict-fbs-size` limits them to `p`. The `basic` policy
 uses per-gate LUTs and does not enforce these composition-size limits. Run
 `target/release/fbs-map --help` for all controls.
 
-`--trials N` runs the selected mapper first with the topological order encoded
-in the circuit, then with `N - 1` deterministic random topological orders
-derived from `--seed`. The best mapping is retained and total mapping time is
-reported.
+The mapper runs once with the topological order encoded in the circuit.
+`--trials N` adds `N` deterministic random topological orders derived from
+`--seed`; `--exclude-input-order` skips the input-order run. The best mapping is
+retained and total mapping time is reported.
+Random scheduling chooses among the eight earliest ready gates in input order
+to preserve locality while exploring different topological orders.
 
 > [!NOTE]
 > Multi-output FBS support, inspired by [CIM19](https://eprint.iacr.org/2018/622), is experimental.
@@ -176,24 +184,24 @@ measured encrypted-execution times.
 
 | bench | #gates | naive cost | naive #boots. | naive FBS size | search cost | search #boots. | search FBS size |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| adder | 1020 |  |  |  | -64% | 256 (-75%) | 5 (7) |
+| adder | 1020 | -17% | 764 (-25%) | 3 (4) | -67% | 192 (-81%) | 10 (8) |
 | bar | 3336 |  |  |  | -24% | 1664 (-50%) | 7 (10) |
-| div | 57247 |  |  |  | -30% | 27644 (-52%) | 5 (10) |
-| hyp | 214335 |  |  |  | -39% | 82429 (-62%) | 7 (14) |
-| log2 | 32060 |  |  |  | -37% | 14039 (-56%) | 5 (10) |
-| max | 2865 | -6% | 1781 (-38%) | 7 (8) | -34% | 905 (-68%) | 9 (15) |
-| multiplier | 27062 |  |  |  | -49% | 8720 (-68%) | 7 (14) |
-| sin | 5416 |  |  |  | -36% | 2273 (-58%) | 6 (11) |
-| sqrt | 24618 |  |  |  | -54% | 7462 (-70%) | 6 (11) |
-| square | 18484 |  |  |  | -32% | 8667 (-53%) | 5 (10) |
+| div | 57247 |  |  |  | -30% | 25133 (-56%) | 7 (14) |
+| hyp | 214335 |  |  |  | -40% | 80627 (-62%) | 7 (14) |
+| log2 | 32060 | -4% | 19836 (-38%) | 7 (12) | -38% | 13807 (-57%) | 5 (10) |
+| max | 2865 | -6% | 1781 (-38%) | 7 (8) | -53% | 873 (-70%) | 7 (13) |
+| multiplier | 27062 | -2% | 17068 (-37%) | 7 (12) | -51% | 9127 (-66%) | 5 (10) |
+| sin | 5416 | -3% | 3392 (-37%) | 7 (12) | -39% | 2195 (-59%) | 6 (12) |
+| sqrt | 24618 |  |  |  | -54% | 7405 (-70%) | 6 (11) |
+| square | 18484 |  |  |  | -35% | 8260 (-55%) | 5 (10) |
 | arbiter | 11839 | -20% | 6544 (-45%) | 5 (8) | -48% | 4259 (-64%) | 5 (8) |
-| cavlc | 693 |  | 455 (-34%) | 7 (8) | -36% | 287 (-59%) | 7 (13) |
-| ctrl | 174 | -3% | 109 (-37%) | 7 (8) | -40% | 67 (-61%) | 7 (12) |
+| cavlc | 693 | -2% | 449 (-35%) | 7 (8) | -36% | 284 (-59%) | 7 (13) |
+| ctrl | 174 | -3% | 109 (-37%) | 7 (8) | -47% | 56 (-68%) | 8 (13) |
 | dec | 304 |  |  |  |  |  |  |
-| i2c | 1342 | -1% | 874 (-35%) | 7 (8) | -34% | 572 (-57%) | 7 (14) |
-| int2float | 260 | -8% | 157 (-40%) | 7 (8) | -49% | 85 (-67%) | 7 (13) |
-| mem_ctrl | 46836 | -4% | 28959 (-38%) | 7 (8) | -31% | 20961 (-55%) | 7 (13) |
-| priority | 978 |  |  |  | -40% | 388 (-60%) | 6 (11) |
-| router | 257 | -9% | 154 (-40%) | 7 (8) | -42% | 94 (-63%) | 7 (14) |
-| voter | 13758 |  |  |  | -38% | 5882 (-57%) | 5 (10) |
-| avg. |  | -3% | (-15%) |  | -38% | (-58%) |  |
+| i2c | 1342 | -2% | 870 (-35%) | 7 (8) | -35% | 562 (-58%) | 7 (13) |
+| int2float | 260 | -10% | 155 (-40%) | 7 (8) | -50% | 84 (-68%) | 7 (13) |
+| mem_ctrl | 46836 | -5% | 28686 (-39%) | 7 (12) | -31% | 20950 (-55%) | 7 (14) |
+| priority | 978 |  |  |  | -40% | 387 (-60%) | 6 (11) |
+| router | 257 | -20% | 133 (-48%) | 7 (12) | -42% | 94 (-63%) | 7 (14) |
+| voter | 13758 | -7% | 8444 (-39%) | 7 (8) | -44% | 4872 (-65%) | 7 (14) |
+| avg. |  | -5% | (-25%) |  | -40% | (-59%) |  |

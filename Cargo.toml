@@ -9,6 +9,9 @@ license = "MIT"
 name = "fbs-map"
 path = "src/main.rs"
 
+[dependencies]
+log = "0.4"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

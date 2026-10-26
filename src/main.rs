@@ -12,6 +12,46 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+/// Minimal logger that writes enabled records to standard error.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    // Accept records up to the process-wide maximum log level.
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level().to_level_filter() <= log::max_level()
+    }
+
+    // Write one level-and-target-prefixed record to standard error.
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{} {}: {}", record.level(), record.target(), record.args());
+        }
+    }
+
+    // Standard error requires no explicit flushing here.
+    fn flush(&self) {}
+}
+
+static LOGGER: StderrLogger = StderrLogger;
+
+// Install the process logger with warnings enabled by default.
+fn init_logger() {
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
+}
+
+// Map repeated verbosity flags through the standard logging levels.
+fn verbosity_level(verbosity: usize) -> log::LevelFilter {
+    match verbosity {
+        0 => log::LevelFilter::Warn,
+        1 => log::LevelFilter::Info,
+        2 => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Trace,
+    }
+}
+
+/// Validated command-line settings for one mapping run.
 #[derive(Debug)]
 struct Arguments {
     filename: PathBuf,
@@ -22,14 +62,18 @@ struct Arguments {
     max_tt_size: usize,
     max_norm2: Option<u128>,
     trials: usize,
+    exclude_input_order: bool,
     seed: u64,
     verify_samples: usize,
     multioutput_fbs: bool,
+    verbosity: usize,
     output: Option<PathBuf>,
     output_lbf: Option<PathBuf>,
 }
 
+// Initialize logging, run the mapper, and translate errors to an exit status.
 fn main() -> ExitCode {
+    init_logger();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -39,8 +83,10 @@ fn main() -> ExitCode {
     }
 }
 
+// Parse inputs, run mapping trials, verify the result, and emit outputs.
 fn run() -> Result<(), String> {
     let arguments = parse_arguments()?;
+    log::set_max_level(verbosity_level(arguments.verbosity));
     let bit_circuit = parse_file(&arguments.filename, &arguments.input_type)?;
     let max_fbs_size = if arguments.strict_fbs_size {
         arguments.fbs_size
@@ -66,19 +112,41 @@ fn run() -> Result<(), String> {
         multioutput_fbs: arguments.multioutput_fbs,
     };
 
+    let include_input_order = !arguments.exclude_input_order;
+    let mapping_count = arguments
+        .trials
+        .checked_add(usize::from(include_input_order))
+        .ok_or_else(|| "too many mapping trials".to_owned())?;
     let mut best = None;
     let mut total_duration = 0.0;
-    for trial in 0..arguments.trials {
+    for trial in 0..mapping_count {
+        let schedule_policy = trial_schedule(trial, arguments.seed, include_input_order);
+        log::info!(
+            target: "mapper",
+            "trial {}/{} schedule={schedule_policy:?}",
+            trial + 1,
+            mapping_count
+        );
         let mapper = Mapper::new(MapConfig {
-            schedule_policy: trial_schedule(trial, arguments.seed),
+            schedule_policy,
             ..base_config.clone()
         })?;
         let start = Instant::now();
         let mapped = mapper.map(&bit_circuit)?;
         total_duration += start.elapsed().as_secs_f64();
-        if best.as_ref().is_none_or(|current: &LutCircuit| {
+        let replace_best = best.as_ref().is_none_or(|current: &LutCircuit| {
             mapped.stats().quality_key() < current.stats().quality_key()
-        }) {
+        });
+        if log::log_enabled!(target: "mapper", log::Level::Info) {
+            log::info!(
+                target: "mapper",
+                "trial {}/{} result={:?} selected={replace_best}",
+                trial + 1,
+                mapping_count,
+                mapped.stats()
+            );
+        }
+        if replace_best {
             best = Some(mapped);
         }
     }
@@ -104,7 +172,7 @@ fn run() -> Result<(), String> {
         "{{'nb_inp': {}, 'nb_linprod': {}, 'nb_bootstrap': {}, 'max_lut_size': {}, \
          'norm2_linprod': {}, 'nb_out': {}, 'filename': '{}', 'fbs_size': {}, \
          'mapper': '{}', 'multioutput_fbs': {}, 'strict_fbs_size': {}, 'max_tt_size': {}, 'max_fbs_size': {}, \
-         'max_norm2': {}, 'trials': {}, 'time': {:.9}}}",
+         'max_norm2': {}, 'trials': {}, 'exclude_input_order': {}, 'time': {:.9}}}",
         stats.input_count,
         stats.linear_count,
         stats.bootstrap_count,
@@ -123,11 +191,13 @@ fn run() -> Result<(), String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "None".to_owned()),
         arguments.trials,
+        python_bool(arguments.exclude_input_order),
         total_duration,
     );
     Ok(())
 }
 
+// Read a circuit and parse it using the requested or inferred format.
 fn parse_file(path: impl AsRef<Path>, input_type: &str) -> Result<BoolCircuit, String> {
     let path = path.as_ref();
     let source =
@@ -149,18 +219,24 @@ fn parse_file(path: impl AsRef<Path>, input_type: &str) -> Result<BoolCircuit, S
     circuit.map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn trial_schedule(trial: usize, seed: u64) -> SchedulePolicy {
-    if trial == 0 {
+// Use the input order first when enabled, then deterministic random orders.
+fn trial_schedule(trial: usize, seed: u64, include_input_order: bool) -> SchedulePolicy {
+    if include_input_order && trial == 0 {
         SchedulePolicy::Original
     } else {
         SchedulePolicy::Random {
-            seed: seed.wrapping_add((trial - 1) as u64),
+            seed: seed.wrapping_add((trial - usize::from(include_input_order)) as u64),
         }
     }
 }
 
+// Parse command-line arguments supplied by the process.
 fn parse_arguments() -> Result<Arguments, String> {
-    let mut arguments = env::args().skip(1);
+    parse_arguments_from(env::args().skip(1))
+}
+
+// Parse and validate command-line arguments from an arbitrary iterator.
+fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, String> {
     let mut filename = None;
     let mut mapper = "search".to_owned();
     let mut input_type = "auto".to_owned();
@@ -168,10 +244,12 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut strict_fbs_size = false;
     let mut max_tt_size = 16usize;
     let mut max_norm2 = None;
-    let mut trials = 1usize;
+    let mut trials = 0usize;
+    let mut exclude_input_order = false;
     let mut seed = 42u64;
     let mut verify_samples = 1000usize;
     let mut multioutput_fbs = false;
+    let mut verbosity = 0usize;
     let mut output = None;
     let mut output_lbf = None;
 
@@ -191,9 +269,18 @@ fn parse_arguments() -> Result<Arguments, String> {
                 max_norm2 = Some(parse_value(&mut arguments, &argument)?)
             }
             "--trials" => trials = parse_value(&mut arguments, &argument)?,
+            "--exclude-input-order" | "--exclude_input_order" => exclude_input_order = true,
             "--seed" => seed = parse_value(&mut arguments, &argument)?,
             "--verify-samples" => verify_samples = parse_value(&mut arguments, &argument)?,
             "--multioutput-fbs" | "--multioutput_fbs" => multioutput_fbs = true,
+            "-v" | "--verbose" => verbosity += 1,
+            value
+                if value.len() > 2
+                    && value.starts_with('-')
+                    && value[1..].chars().all(|character| character == 'v') =>
+            {
+                verbosity += value.len() - 1;
+            }
             "--output" => output = Some(PathBuf::from(next_value(&mut arguments, "--output")?)),
             "--output-lbf" | "--output_lbf" => {
                 output_lbf = Some(PathBuf::from(next_value(&mut arguments, &argument)?));
@@ -215,8 +302,8 @@ fn parse_arguments() -> Result<Arguments, String> {
         }
     }
 
-    if trials == 0 {
-        return Err("--trials must be positive".to_owned());
+    if exclude_input_order && trials == 0 {
+        return Err("--exclude-input-order requires at least one random trial".to_owned());
     }
 
     Ok(Arguments {
@@ -228,14 +315,17 @@ fn parse_arguments() -> Result<Arguments, String> {
         max_tt_size,
         max_norm2,
         trials,
+        exclude_input_order,
         seed,
         verify_samples,
         multioutput_fbs,
+        verbosity,
         output,
         output_lbf,
     })
 }
 
+// Consume the value following an option or report it as missing.
 fn next_value(
     arguments: &mut impl Iterator<Item = String>,
     option: &str,
@@ -245,6 +335,7 @@ fn next_value(
         .ok_or_else(|| format!("{option} requires a value"))
 }
 
+// Parse a typed option value from the next command-line argument.
 fn parse_value<T: std::str::FromStr>(
     arguments: &mut impl Iterator<Item = String>,
     option: &str,
@@ -255,6 +346,7 @@ fn parse_value<T: std::str::FromStr>(
         .map_err(|_| format!("invalid value '{value}' for {option}"))
 }
 
+// Print command usage and supported options.
 fn print_help() {
     println!(
         r#"Map a Boolean circuit to TFHE functional bootstraps.
@@ -268,10 +360,12 @@ Options:
   --strict-fbs-size        Disable the negacyclic extension from p to 2p
   --max-tt-size <N>        Maximum cone support before forced bootstrap (default: 16)
   --max-norm2 <N>          Maximum sum of squared linear-combination coefficients
-  --trials <N>             Original order once, then N-1 random orders (default: 1)
+  --trials <N>             Add N random-order mappings (default: 0)
+  --exclude-input-order    Skip the input-order mapping
   --seed <N>               Random-order and verification seed (default: 42)
   --verify-samples <N>     Random equivalence samples above 16 inputs (default: 1000)
   --multioutput-fbs        Group bootstrap outputs with the same linear input
+  -v, --verbose            Increase logging from Warn to Info, Debug, then Trace
   --output <FILE>          Write the human-readable FBS circuit
   --output-lbf <FILE>      Write an LBF circuit
   -h, --help               Show this help
@@ -279,6 +373,7 @@ Options:
     );
 }
 
+// Verify mapping equivalence exhaustively or with deterministic samples.
 fn verify(
     bit_circuit: &BoolCircuit,
     lut_circuit: &LutCircuit,
@@ -307,6 +402,7 @@ fn verify(
     Ok(())
 }
 
+// Compare both circuits on one named input assignment.
 fn compare_once(
     bit_circuit: &BoolCircuit,
     lut_circuit: &LutCircuit,
@@ -322,6 +418,7 @@ fn compare_once(
     Ok(())
 }
 
+// Advance a deterministic nonzero xorshift pseudorandom state.
 fn xorshift64(mut value: u64) -> u64 {
     if value == 0 {
         value = 0x4d59_5df4_d0f3_3173;
@@ -331,10 +428,12 @@ fn xorshift64(mut value: u64) -> u64 {
     value ^ (value << 17)
 }
 
+// Format a Boolean using Python literal spelling.
 fn python_bool(value: bool) -> &'static str {
     if value { "True" } else { "False" }
 }
 
+// Escape a value embedded in a single-quoted Python-style field.
 fn escape_single_quotes(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
@@ -344,9 +443,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trials_use_original_then_distinct_random_seeds() {
-        assert_eq!(trial_schedule(0, 42), SchedulePolicy::Original);
-        assert_eq!(trial_schedule(1, 42), SchedulePolicy::Random { seed: 42 });
-        assert_eq!(trial_schedule(2, 42), SchedulePolicy::Random { seed: 43 });
+    fn trials_use_input_order_then_distinct_random_seeds() {
+        assert_eq!(trial_schedule(0, 42, true), SchedulePolicy::Original);
+        assert_eq!(
+            trial_schedule(1, 42, true),
+            SchedulePolicy::Random { seed: 42 }
+        );
+        assert_eq!(
+            trial_schedule(2, 42, true),
+            SchedulePolicy::Random { seed: 43 }
+        );
+        assert_eq!(
+            trial_schedule(0, 42, false),
+            SchedulePolicy::Random { seed: 42 }
+        );
+        assert_eq!(
+            trial_schedule(1, 42, false),
+            SchedulePolicy::Random { seed: 43 }
+        );
+    }
+
+    #[test]
+    fn excluding_input_order_requires_a_random_trial() {
+        let error = parse_arguments_from(
+            ["--exclude-input-order", "circuit.blif"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "--exclude-input-order requires at least one random trial"
+        );
+
+        let arguments = parse_arguments_from(
+            ["--trials", "2", "--exclude-input-order", "circuit.blif"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(arguments.trials, 2);
+        assert!(arguments.exclude_input_order);
+    }
+
+    #[test]
+    fn verbose_flags_select_standard_logging_levels() {
+        let compact =
+            parse_arguments_from(["-vvv", "circuit.blif"].into_iter().map(str::to_owned)).unwrap();
+        assert_eq!(compact.verbosity, 3);
+
+        let repeated = parse_arguments_from(
+            ["--verbose", "-v", "--verbose", "circuit.blif"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(repeated.verbosity, 3);
+        assert_eq!(verbosity_level(0), log::LevelFilter::Warn);
+        assert_eq!(verbosity_level(1), log::LevelFilter::Info);
+        assert_eq!(verbosity_level(2), log::LevelFilter::Debug);
+        assert_eq!(verbosity_level(compact.verbosity), log::LevelFilter::Trace);
+        assert_eq!(verbosity_level(usize::MAX), log::LevelFilter::Trace);
     }
 }

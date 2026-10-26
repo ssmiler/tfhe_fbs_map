@@ -46,8 +46,10 @@ unreachable. Their values do not affect the circuit's Boolean outputs, but
 must still satisfy the FBS test-vector constraints. The mapper first fills
 all unreachable entries with `0` and checks validity. If that fails, it fills
 all of them with `1` and checks again, leaving reachable entries unchanged.
-If neither completion is valid, the candidate is rejected. Mixed fillings
-(some unreachable entries set to `0`, others to `1`) are not supported.
+If neither uniform completion is valid, missing entries are treated as
+wildcards and completed pair by pair to satisfy the antipodal constraint.
+This mixed completion takes linear time. The emitted test vector still contains
+only concrete `0` and `1` values.
 
 ## Limits and trials
 
