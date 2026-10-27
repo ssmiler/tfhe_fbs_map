@@ -169,16 +169,17 @@ fn run() -> Result<(), String> {
 
     let stats = lut_circuit.stats();
     println!(
-        "{{'nb_inp': {}, 'nb_linprod': {}, 'nb_bootstrap': {}, 'max_lut_size': {}, \
-         'norm2_linprod': {}, 'nb_out': {}, 'filename': '{}', 'fbs_size': {}, \
+        "{{'nb_inp': {}, 'nb_out': {}, 'nb_linprod': {}, 'nb_bootstrap': {}, 'execution_fbs_size': {}, \
+         'max_lut_size': {}, 'norm2_linprod': {}, 'filename': '{}', 'fbs_size': {}, \
          'mapper': '{}', 'multioutput_fbs': {}, 'strict_fbs_size': {}, 'max_tt_size': {}, 'max_fbs_size': {}, \
          'max_norm2': {}, 'trials': {}, 'exclude_input_order': {}, 'time': {:.9}}}",
         stats.input_count,
+        stats.output_count,
         stats.linear_count,
         stats.bootstrap_count,
+        lut_circuit.execution_fbs_size(arguments.strict_fbs_size),
         stats.max_lut_size,
         stats.max_norm2,
-        stats.output_count,
         escape_single_quotes(&arguments.filename.to_string_lossy()),
         arguments.fbs_size,
         arguments.mapper,
@@ -430,7 +431,7 @@ fn xorshift64(mut value: u64) -> u64 {
 
 // Format a Boolean using Python literal spelling.
 fn python_bool(value: bool) -> &'static str {
-    if value { "True" } else { "False" }
+    if value { "1" } else { "0" }
 }
 
 // Escape a value embedded in a single-quoted Python-style field.

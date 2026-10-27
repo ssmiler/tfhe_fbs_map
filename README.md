@@ -31,7 +31,7 @@ target/release/fbs-map circuit.blif \
 
 The available mapping policies are:
 
-- `basic`: maps each two-input Boolean gate independently to a functional bootstrap (FBS); unary gates use linear operations without bootstrapping.
+- `basic`: uses `search` at FBS size 2 and bootstraps after every gate composition; constants and unary gates retain search's simplifications.
 - `naive`: composes gate-input cones using a fixed-radix linear combination. For independent Boolean inputs, this gives power-of-two weights such as `a + 2*b + 4*c + ...`, up to input order.
 - `search`: composes gate-input cones by searching coefficient pairs that minimize a span bound on the FBS input encoding (the paper's greedy heuristic).
 
@@ -43,7 +43,7 @@ coefficient vector, `sum_i(c_i²)`, to `N`. This limit is separate from search's
 multivalue-table tie-breaker.
 For `naive` and `search`, valid negacyclic test vectors can have
 up to `2p` entries; `--strict-fbs-size` limits them to `p`. The `basic` policy
-uses per-gate LUTs and does not enforce these composition-size limits. Run
+always uses `p=2`, with the same negacyclic and strict-size rules. Run
 `target/release/fbs-map --help` for all controls.
 
 The mapper runs once with the topological order encoded in the circuit.
@@ -184,7 +184,7 @@ measured encrypted-execution times.
 
 | bench | #gates | naive cost | naive #boots. | naive FBS size | search cost | search #boots. | search FBS size |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| adder | 1020 | -17% | 764 (-25%) | 3 (4) | -67% | 192 (-81%) | 10 (8) |
+| adder | 1020 | -17% | 764 (-25%) | 3 (4) | -72% | 256 (-75%) | 3 (4) |
 | bar | 3336 |  |  |  | -24% | 1664 (-50%) | 7 (10) |
 | div | 57247 |  |  |  | -30% | 25133 (-56%) | 7 (14) |
 | hyp | 214335 |  |  |  | -40% | 80627 (-62%) | 7 (14) |
@@ -202,6 +202,6 @@ measured encrypted-execution times.
 | int2float | 260 | -10% | 155 (-40%) | 7 (8) | -50% | 84 (-68%) | 7 (13) |
 | mem_ctrl | 46836 | -5% | 28686 (-39%) | 7 (12) | -31% | 20950 (-55%) | 7 (14) |
 | priority | 978 |  |  |  | -40% | 387 (-60%) | 6 (11) |
-| router | 257 | -20% | 133 (-48%) | 7 (12) | -42% | 94 (-63%) | 7 (14) |
+| router | 257 | -22% | 132 (-49%) | 7 (8) | -42% | 94 (-63%) | 7 (14) |
 | voter | 13758 | -7% | 8444 (-39%) | 7 (8) | -44% | 4872 (-65%) | 7 (14) |
 | avg. |  | -5% | (-25%) |  | -40% | (-59%) |  |
