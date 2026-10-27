@@ -137,11 +137,11 @@ def f2(df):
     t_ref = df1.loc[df1.mapper == "basic", ["total_cost", "nb_bootstrap", "bench"]].set_index("bench")
 
     def g(df1):
-        t = df1.groupby("bench").apply(lambda d: d.iloc[d.total_cost.argmin()].loc[["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"]], include_groups=False)
+        t = df1.groupby("bench").apply(lambda d: d.iloc[d.total_cost.argmin()].loc[["total_cost", "nb_bootstrap", "execution_fbs_size", "max_lut_size"]], include_groups=False)
         t["ratio_cost"] = t_ref["total_cost"] / t["total_cost"]
         t["ratio_boots"] = (t["nb_bootstrap"] / t_ref["nb_bootstrap"] - 1)*100
-        t["FBS size"] = t.apply(lambda e: f"{int(e.fbs_size)} ({int(e.max_lut_size):2})", axis = 1)
-        t.drop(["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"], inplace=True, axis=1)
+        t["FBS size"] = t.apply(lambda e: f"{int(e.execution_fbs_size)} ({int(e.max_lut_size):2})", axis = 1)
+        t.drop(["total_cost", "nb_bootstrap", "execution_fbs_size", "max_lut_size"], inplace=True, axis=1)
         t.columns = ["speedup", "boots.", "FBS size"]
         return t
 
@@ -165,10 +165,10 @@ def f2b(df):
     t_ref = df1.loc[df1.mapper == "basic", ["total_cost", "nb_bootstrap", "bench"]].set_index("bench")
 
     def g(df1):
-        t = df1.groupby("bench").apply(lambda d: d.iloc[d.total_cost.argmin()].loc[["total_cost", "nb_bootstrap", "fbs_size", "max_lut_size"]], include_groups=False)
+        t = df1.groupby("bench").apply(lambda d: d.iloc[d.total_cost.argmin()].loc[["total_cost", "nb_bootstrap", "execution_fbs_size", "max_lut_size"]], include_groups=False)
         t["ratio_cost"] = (t["total_cost"] / t_ref["total_cost"] - 1) * 100
         t["decrease"] = (1 - t["nb_bootstrap"] / t_ref["nb_bootstrap"]) * 100
-        t["FBS size"] = t.apply(lambda e: f"{int(e.fbs_size)} ({int(e.max_lut_size)})", axis = 1)
+        t["FBS size"] = t.apply(lambda e: f"{int(e.execution_fbs_size)} ({int(e.max_lut_size)})", axis = 1)
         t = t[["ratio_cost", "nb_bootstrap", "decrease", "FBS size"]].copy()
         t.columns = ["cost", "\\#boots.", "decrease", "FBS size"]
         return t
@@ -194,23 +194,23 @@ def f4(df):
     t_ref = df1.loc[df1.mapper == "basic", ["nb_bootstrap", "bench"]].set_index("bench")
 
     def g(df1):
-        t = df1.groupby("bench").apply(lambda d: d.iloc[d.nb_bootstrap.argmin()].loc[["nb_bootstrap", "fbs_size", "max_lut_size"]], include_groups=False)
+        t = df1.groupby("bench").apply(lambda d: d.iloc[d.nb_bootstrap.argmin()].loc[["nb_bootstrap", "execution_fbs_size", "max_lut_size"]], include_groups=False)
         t["ratio_boots"] = t_ref["nb_bootstrap"] / t["nb_bootstrap"]
         t["decrease"] = (1 - t["nb_bootstrap"] / t_ref["nb_bootstrap"]) * 100
-        t["FBS size"] = t.apply(lambda e: f"{int(e.fbs_size)} ({int(e.max_lut_size):2})", axis = 1)
+        t["FBS size"] = t.apply(lambda e: f"{int(e.execution_fbs_size)} ({int(e.max_lut_size):2})", axis = 1)
         t = t[["nb_bootstrap", "decrease", "ratio_boots", "FBS size"]].copy()
         t.columns = ["\\#boots.", "decrease", "speedup", "FBS size"]
         return t
 
     # df1 = df
     # df1 = df1[df1.mapper == "naive"]
-    # df1 = df1[df1.fbs_size <= 32]
+    # df1 = df1[df1.execution_fbs_size <= 32]
     # t_naive = g(df1)
     # t_naive.columns = pd.MultiIndex.from_tuples(it.product(["naive"], t_naive.columns))
 
     df1 = df
     df1 = df1[df1.mapper == "search"]
-    df1 = df1[df1.fbs_size <= 32]
+    df1 = df1[df1.execution_fbs_size <= 32]
     t_search = g(df1)
     t_search.columns = pd.MultiIndex.from_tuples(it.product(["search"], t_search.columns))
 
@@ -258,7 +258,7 @@ plt.plot(d1.index, d1.values, ".-", label="search")
 
 plt.legend()
 plt.ylabel('execution time per gate (ms)')
-plt.xlabel('FBS size (p)')
+plt.xlabel('Mapping FBS size (p)')
 plt.savefig("exec_time_per_fbs.pdf")
 
 
@@ -350,17 +350,17 @@ df1 = df
 # df1 = df1[df1.bench == "AES-non-expanded"]
 df1 = df1[df1.bench == "aes_128"]
 df1 = df1[df1.mapper == "search"]
-df1 = df1[df1.fbs_size <= 16]
-d = df1[df1.strict_fbs_size == False]
+df1 = df1[df1.execution_fbs_size <= 16]
+d = df1[df1.strict_fbs_size == False].sort_values("execution_fbs_size")
 fig, ax1 = plt.subplots()
-ax1.set_xlabel('FBS size (p)')
+ax1.set_xlabel('Execution FBS size (p)')
 ax1.set_ylabel('number of bootstraps', color='b')
-ax1.plot(d.fbs_size, d.nb_bootstrap, 'b.-')
+ax1.plot(d.execution_fbs_size, d.nb_bootstrap, 'b.-')
 ax1.tick_params(axis='y', labelcolor='b')
 
 ax2 = ax1.twinx()
 ax2.set_ylabel('evaluation cost', color='r')
-ax2.plot(d.fbs_size, d.total_cost, 'r.-')
+ax2.plot(d.execution_fbs_size, d.total_cost, 'r.-')
 ax2.tick_params(axis='y', labelcolor='r')
 
 fig.tight_layout()  # otherwise the right y-label is slightly clipped
@@ -376,28 +376,28 @@ df = add_best_cols(df)
 # trivium/kreyvium
 df1 = df
 df1 = df1[df1.mapper == "search"]
-df1 = df1[df1.fbs_size <= 12]
+df1 = df1[df1.execution_fbs_size <= 12]
 for bench, cnt in zip(["trivium_iter", "kreyvium_iter"], [8, 10]):
     fig = plt.figure()
     gs = fig.add_gridspec(2, hspace=0)
     axs = gs.subplots(sharex=True)
     ax1 = axs[0]
     ax1.set_ylabel('number of bootstraps')
-    d = df1[df1.bench == f"{bench}_v1"]
-    ax1.plot(d.fbs_size, d.nb_bootstrap, 'b.-', label = "version 1")
-    d = df1[df1.bench == f"{bench}_v2"]
-    ax1.plot(d.fbs_size, d.nb_bootstrap, 'g.-', label = "version 2")
+    d = df1[df1.bench == f"{bench}_v1"].sort_values("execution_fbs_size")
+    ax1.plot(d.execution_fbs_size, d.nb_bootstrap, 'b.-', label = "version 1")
+    d = df1[df1.bench == f"{bench}_v2"].sort_values("execution_fbs_size")
+    ax1.plot(d.execution_fbs_size, d.nb_bootstrap, 'g.-', label = "version 2")
     ax1.plot([4], [cnt], 'ro')
     ax1.tick_params(axis='y')
     ax1.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
 
     ax2 = axs[1]
-    ax2.set_xlabel('FBS size (p)')
+    ax2.set_xlabel('Execution FBS size (p)')
     ax2.set_ylabel('evaluation cost')
-    d = df1[df1.bench == f"{bench}_v1"]
-    ax2.plot(d.fbs_size, d.total_cost, 'b.-', label = "")
-    d = df1[df1.bench == f"{bench}_v2"]
-    ax2.plot(d.fbs_size, d.total_cost, 'g.-', label = "")
+    d = df1[df1.bench == f"{bench}_v1"].sort_values("execution_fbs_size")
+    ax2.plot(d.execution_fbs_size, d.total_cost, 'b.-', label = "")
+    d = df1[df1.bench == f"{bench}_v2"].sort_values("execution_fbs_size")
+    ax2.plot(d.execution_fbs_size, d.total_cost, 'g.-', label = "")
     ax2.plot([4], [cnt * 40], 'ro')
     ax2.tick_params(axis='y')
 
@@ -408,8 +408,8 @@ for bench, cnt in zip(["trivium_iter", "kreyvium_iter"], [8, 10]):
 # aes sbox
 df1 = df
 df1 = df1[df1.mapper == "search"]
-# df1 = df1[df1.fbs_size <= 14]
-# df1 = df1[df1.fbs_size >= 4]
+# df1 = df1[df1.execution_fbs_size <= 14]
+# df1 = df1[df1.execution_fbs_size >= 4]
 d = df1[df1.bench == "aes_sbox"]
 
 # Bon et al. results
@@ -427,31 +427,31 @@ bon_simon_total_cost = bon_simon_nb_fbs * 47 # 47 is the FBS cost with precision
 
 best_aes_idx = d.total_cost.idxmin()
 our_aes_nb_fbs = d.loc[best_aes_idx].nb_bootstrap
-our_aes_fbs_size = d.loc[best_aes_idx].fbs_size
+our_aes_fbs_size = d.loc[best_aes_idx].execution_fbs_size
 our_aes_max_lut_size = d.loc[best_aes_idx].max_lut_size
 our_aes_total_cost = d.loc[best_aes_idx].total_cost
 
 df1 = df
 df1 = df1[df1.mapper == "search"]
-# df1 = df1[df1.fbs_size >= 7]
+# df1 = df1[df1.execution_fbs_size >= 7]
 d = df1[df1.bench == "ascon_lut"]
 
 best_ascon_idx = d.total_cost.idxmin()
 our_ascon_nb_fbs = d.loc[best_ascon_idx].nb_bootstrap
-our_ascon_fbs_size = d.loc[best_ascon_idx].fbs_size
+our_ascon_fbs_size = d.loc[best_ascon_idx].execution_fbs_size
 our_ascon_max_lut_size = d.loc[best_ascon_idx].max_lut_size
 our_ascon_total_cost = d.loc[best_ascon_idx].total_cost
 
 
 df1 = df
 df1 = df1[df1.mapper == "search"]
-# df1 = df1[df1.fbs_size >= 7]
+# df1 = df1[df1.execution_fbs_size >= 7]
 d = df1[df1.bench == "simon_iter"]
 
 
 best_simon_idx = d.total_cost.idxmin()
 our_simon_nb_fbs = d.loc[best_simon_idx].nb_bootstrap
-our_simon_fbs_size = d.loc[best_simon_idx].fbs_size
+our_simon_fbs_size = d.loc[best_simon_idx].execution_fbs_size
 our_simon_max_lut_size = d.loc[best_simon_idx].max_lut_size
 our_simon_total_cost = d.loc[best_simon_idx].total_cost
 
