@@ -8,7 +8,10 @@ get_boot_cost_dict = dict()
 
 
 def get_boot_cost(row):
-    precision, norm2 = row["fbs_size"], row["norm2_linprod"]
+    precision = row.get("execution_fbs_size", row["fbs_size"])
+    if pd.isna(precision):
+        precision = row["fbs_size"]
+    precision, norm2 = int(precision), row["norm2_linprod"]
     key = (precision, norm2)
     if key not in get_boot_cost_dict:
         print(f"Call {args.opt} with {precision} {norm2}")

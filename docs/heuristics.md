@@ -2,8 +2,9 @@
 
 `fbs-map` exposes the three mapping policies described in [README.md](../README.md).
 
-- `basic` maps each two-input Boolean gate independently to a functional
-  bootstrap (FBS). Unary gates use linear operations without bootstrapping.
+- `basic` uses the same coefficient search as `search` at FBS size 2 and
+  bootstraps after every gate composition. Constants and unary gates retain
+  search's simplifications.
 - `naive` composes gate-input cones with a fixed-radix linear combination,
   without searching coefficients. For independent Boolean inputs, repeated
   composition gives power-of-two weights such as `a + 2*b + 4*c + ...`, up to
@@ -57,8 +58,9 @@ For `naive` and `search`, test vectors can have up to `2p` entries when the
 negacyclic-extension conditions are satisfied; `--strict-fbs-size` limits them
 to `p`. `--max-tt-size` bounds cone support before forced bootstrapping, and
 `--max-norm2 N` limits `sum_i(c_i²)` of candidate cones to `N`. `basic`
-normally uses four-entry binary LUTs and does not apply the composition-size
-or cone-support limits; its norm limit is checked on the mapped linear forms.
+always uses `p=2` regardless of `--fbs-size`, applies the same composition
+limits, and bootstraps each gate before continuing. With `--strict-fbs-size`,
+only two-entry tables are allowed, so some binary functions cannot be mapped.
 
 `--trials N` runs the selected policy once in the circuit's encoded topological
 order, then in `N - 1` deterministic random topological orders derived from

@@ -1,5 +1,5 @@
 use crate::circuit::{BoolCircuit, BoolNode, BoolWire};
-use crate::lut::{LutCircuit, LutSignal};
+use crate::lut::{LutCircuit, LutSignal, is_fbs_table_valid};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -564,10 +564,12 @@ impl Mapper {
                 }
             }
 
-            let cone = if !self.config.multioutput_fbs && forced_outputs[gate_id] {
+            let basic = self.config.coefficient_policy == CoefficientPolicy::Basic;
+            let cone = if basic || (!self.config.multioutput_fbs && forced_outputs[gate_id]) {
                 log::debug!(
                     target: "mapper",
-                    "bootstrap reason=forced-output gate={name} position={gate_id}"
+                    "bootstrap reason={} gate={name} position={gate_id}",
+                    if basic { "basic-composition" } else { "forced-output" }
                 );
                 self.bootstrap_cone(&mut environment, cone)?
             } else {
@@ -597,126 +599,18 @@ impl Mapper {
         Ok(environment)
     }
 
-    // Map each Boolean LUT independently without cone composition search.
+    // Use size-two search encodings and materialize every gate composition.
     fn map_basic(&self, circuit: &BoolCircuit) -> Result<LutCircuit, String> {
-        let mut environment = LutCircuit::default();
-        environment.set_multioutput_fbs(self.config.multioutput_fbs);
-        let mut wires = vec![LutSignal::Const(0); circuit.nodes.len()];
-        for id in &circuit.inputs {
-            let BoolNode::Input { name } = &circuit.nodes[*id] else {
-                unreachable!()
-            };
-            wires[*id] = environment.input(name);
-        }
-        for id in self.schedule(circuit, self.config.schedule_policy)? {
-            if let BoolNode::Lut {
-                name,
-                inputs,
-                table,
-            } = &circuit.nodes[id]
-                && log::log_enabled!(target: "mapper", log::Level::Debug)
-            {
-                let input_names: Vec<_> = inputs
-                    .iter()
-                    .map(|input| bool_wire_name(circuit, *input))
-                    .collect();
-                log::debug!(
-                    target: "mapper",
-                    "basic gate id={id} name={name} inputs={input_names:?} table={table:?}"
-                );
-            }
-            wires[id] = match &circuit.nodes[id] {
-                BoolNode::Input { .. } => unreachable!(),
-                BoolNode::Lut { inputs, table, .. } => {
-                    let signals: Vec<_> = inputs
-                        .iter()
-                        .map(|input| match input {
-                            BoolWire::Const(value) => LutSignal::Const(i64::from(*value)),
-                            BoolWire::Node(input) => wires[*input],
-                        })
-                        .collect();
-                    match signals.as_slice() {
-                        [input] => match table.as_slice() {
-                            [0, 1] => *input,
-                            [1, 0] => environment.linear(&[(-1, *input)], 1),
-                            _ => return Err("invalid unary truth table".to_owned()),
-                        },
-                        [left, right] => {
-                            let linear = environment.linear(&[(2, *left), (1, *right)], 0);
-                            let (minimum, maximum) = environment.bounds(linear);
-                            if self.config.multioutput_fbs
-                                && minimum == 0
-                                && maximum == 3
-                                && let (LutSignal::Node(left), LutSignal::Node(right)) =
-                                    (*left, *right)
-                                && left != right
-                            {
-                                let cone = Cone {
-                                    support: vec![left, right],
-                                    coefficients: vec![2, 1],
-                                    truth_table: table.clone(),
-                                    multivalue_table: vec![0, 1, 2, 3],
-                                };
-                                if self.is_lut_valid(&cone.truth_table, &cone.multivalue_table)
-                                    || self
-                                        .reusable_cone_coefficients(&environment, &cone)
-                                        .is_some()
-                                {
-                                    let bootstrapped =
-                                        self.bootstrap_cone(&mut environment, cone)?;
-                                    LutSignal::Node(bootstrapped.support[0])
-                                } else {
-                                    // Preserve basic's fixed encoding when no valid reuse is available.
-                                    environment.bootstrap(linear, table.clone())?
-                                }
-                            } else {
-                                let minimum = usize::try_from(minimum).map_err(|_| {
-                                    "binary Boolean encoding has a negative minimum".to_owned()
-                                })?;
-                                let maximum = usize::try_from(maximum).map_err(|_| {
-                                    "binary Boolean encoding has a negative maximum".to_owned()
-                                })?;
-                                let restricted_table = table
-                                .get(minimum..=maximum)
-                                .ok_or_else(|| {
-                                    format!(
-                                        "binary Boolean encoding range [{minimum}, {maximum}] is outside its truth table"
-                                    )
-                                })?
-                                .to_vec();
-                                let shifted = environment.linear(&[(1, linear)], -(minimum as i64));
-                                environment.bootstrap(shifted, restricted_table)?
-                            }
-                        }
-                        _ => {
-                            return Err(
-                                "basic mapper supports only unary and binary gates".to_owned()
-                            );
-                        }
-                    }
-                }
-            };
-            log::debug!(
-                target: "mapper",
-                "basic gate id={id} name={} signal={:?}",
-                circuit.nodes[id].name(),
-                wires[id]
-            );
-        }
-        for (name, output) in &circuit.outputs {
-            let signal = match output {
-                BoolWire::Const(value) => LutSignal::Const(i64::from(*value)),
-                BoolWire::Node(id) => wires[*id],
-            };
-            log::debug!(
-                target: "mapper",
-                "output name={name} source={} signal={signal:?}",
-                bool_wire_name(circuit, *output)
-            );
-            environment.add_output(name.clone(), signal);
-        }
-        environment.prune();
-        Ok(environment)
+        Self::new(MapConfig {
+            fbs_size: 2,
+            max_fbs_size: if self.config.max_fbs_size == self.config.fbs_size {
+                2
+            } else {
+                4
+            },
+            ..self.config.clone()
+        })?
+        .map_once(circuit)
     }
 
     // Dispatch unary, constant-input, and general binary gates.
@@ -1322,18 +1216,7 @@ impl Mapper {
 
     // Check one completed lookup table against negacyclic FBS constraints.
     fn is_test_vector_valid(&self, table: &[u8]) -> bool {
-        if table.len() <= self.config.fbs_size {
-            return true;
-        }
-        if table.len() > self.config.max_fbs_size {
-            return false;
-        }
-        let overlap = table.len() - self.config.fbs_size;
-        let left = &table[..overlap];
-        let right = &table[self.config.fbs_size..];
-        left.iter().zip(right).all(|(x, y)| x != y)
-            || (left.iter().all(|x| *x == 0) && right.iter().all(|x| *x == 0))
-            || (left.iter().all(|x| *x == 1) && right.iter().all(|x| *x == 1))
+        table.len() <= self.config.max_fbs_size && is_fbs_table_valid(table, self.config.fbs_size)
     }
 }
 
@@ -1722,6 +1605,37 @@ mod tests {
         .map(&circuit)
         .unwrap();
         assert_equivalent(&circuit, &mapped);
+    }
+
+    #[test]
+    fn basic_uses_size_two_and_bootstraps_each_binary_composition() {
+        let circuit = BoolCircuit::parse_blif(
+            ".inputs a b\n.outputs y\n.names a b x\n11 1\n.names x a y\n11 1\n.end\n",
+        )
+        .unwrap();
+        for multioutput_fbs in [false, true] {
+            let mut reference = None;
+            for fbs_size in [2, 10] {
+                let mapped = Mapper::new(MapConfig {
+                    fbs_size,
+                    max_fbs_size: 2 * fbs_size,
+                    coefficient_policy: CoefficientPolicy::Basic,
+                    multioutput_fbs,
+                    ..MapConfig::default()
+                })
+                .unwrap()
+                .map(&circuit)
+                .unwrap();
+                assert_equivalent(&circuit, &mapped);
+                assert_eq!(mapped.stats().bootstrap_count, 2);
+                assert_eq!(mapped.execution_fbs_size(false), 2);
+                if let Some(reference) = &reference {
+                    assert_eq!(&mapped.to_lbf(), reference);
+                } else {
+                    reference = Some(mapped.to_lbf());
+                }
+            }
+        }
     }
 
     #[test]
@@ -2513,10 +2427,11 @@ mod tests {
             assert_equivalent(&circuit, &mapped);
             assert_eq!(
                 mapped.stats().bootstrap_count,
-                if multioutput_fbs { 1 } else { 16 }
+                if multioutput_fbs { 2 } else { 10 }
             );
-            assert_eq!(mapped.stats().max_lut_size, 4);
-            assert_eq!(mapped.stats().max_norm2, 5);
+            assert_eq!(mapped.execution_fbs_size(false), 2);
+            assert_eq!(mapped.stats().max_lut_size, 3);
+            assert_eq!(mapped.stats().max_norm2, 2);
         }
     }
 

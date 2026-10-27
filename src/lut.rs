@@ -45,6 +45,21 @@ impl MappingStats {
     }
 }
 
+/// Check a concrete Boolean table against the negacyclic FBS rules.
+pub(crate) fn is_fbs_table_valid(table: &[u8], size: usize) -> bool {
+    if table.len() <= size {
+        return true;
+    }
+    let overlap = table.len() - size;
+    if overlap > size {
+        return false;
+    }
+    let pairs = || table[..overlap].iter().zip(&table[size..]);
+    pairs().all(|(left, right)| left != right)
+        || pairs().all(|(left, right)| *left == 0 && *right == 0)
+        || pairs().all(|(left, right)| *left == 1 && *right == 1)
+}
+
 /// An interned circuit of inputs, linear combinations, and bootstraps.
 #[derive(Clone, Debug, Default)]
 pub struct LutCircuit {
@@ -112,6 +127,31 @@ impl BootstrapLookup {
 }
 
 impl LutCircuit {
+    /// Find the smallest common execution size without changing the circuit.
+    pub fn execution_fbs_size(&self, strict: bool) -> usize {
+        let tables: Vec<_> = self
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                LutNode::Bootstrap { table, .. } => Some(table.as_slice()),
+                _ => None,
+            })
+            .collect();
+        let maximum = tables
+            .iter()
+            .map(|table| table.len())
+            .max()
+            .unwrap_or(0)
+            .max(2);
+        if strict {
+            return maximum;
+        }
+        // Validity can have gaps, so neither binary search nor per-table minima suffice.
+        (maximum.div_ceil(2).max(2)..=maximum)
+            .find(|&size| tables.iter().all(|table| is_fbs_table_valid(table, size)))
+            .unwrap()
+    }
+
     /// Enable or disable grouping bootstraps that share a linear input.
     pub fn set_multioutput_fbs(&mut self, enabled: bool) {
         self.multioutput_fbs = enabled;
@@ -708,6 +748,51 @@ impl LutCircuit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn circuit_with_tables(tables: &[&[u8]]) -> LutCircuit {
+        let mut circuit = LutCircuit::default();
+        for (index, table) in tables.iter().enumerate() {
+            let terms: Vec<_> = (0..table.len() - 1)
+                .map(|bit| (1, circuit.input(&format!("a{index}_{bit}"))))
+                .collect();
+            let input = circuit.linear(&terms, 0);
+            let output = circuit.bootstrap(input, table.to_vec()).unwrap();
+            circuit.add_output(format!("out{index}"), output);
+        }
+        circuit.prune();
+        circuit
+    }
+
+    #[test]
+    fn execution_size_checks_a_common_size_despite_validity_gaps() {
+        let table = [0, 0, 1, 1, 1, 0];
+        assert!(is_fbs_table_valid(&table, 3));
+        assert!(!is_fbs_table_valid(&table, 4));
+        assert!(is_fbs_table_valid(&table, 5));
+        let circuit = circuit_with_tables(&[&table, &[1, 1, 1, 1, 0, 0, 0, 0]]);
+        // The individual minima are 3 and 4, but their first common valid size is 5.
+        assert_eq!(circuit.execution_fbs_size(false), 5);
+        assert_eq!(circuit.execution_fbs_size(true), 8);
+    }
+
+    #[test]
+    fn execution_size_matches_the_size_ten_adder_tables() {
+        let circuit = circuit_with_tables(&[
+            &[1, 0, 1],
+            &[0, 0, 1, 1, 0, 0, 1],
+            &[1, 1, 1, 1, 0, 0, 0],
+            &[1, 0, 1, 0],
+            &[0, 0, 1, 1, 0, 0, 1, 1],
+            &[1, 1, 1, 1, 0, 0, 0, 0],
+            &[0, 0, 0, 0, 1, 1, 1, 1],
+        ]);
+        let before = circuit.to_lbf();
+        assert_eq!(circuit.execution_fbs_size(false), 6);
+        assert_eq!(circuit.execution_fbs_size(true), 8);
+        assert_eq!(circuit.to_lbf(), before);
+        assert_eq!(LutCircuit::default().execution_fbs_size(false), 2);
+        assert_eq!(LutCircuit::default().execution_fbs_size(true), 2);
+    }
 
     #[test]
     fn flattens_and_canonicalizes_linear_nodes() {

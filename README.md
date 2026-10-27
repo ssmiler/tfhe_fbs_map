@@ -31,7 +31,7 @@ target/release/fbs-map circuit.blif \
 
 The available mapping policies are:
 
-- `basic`: maps each two-input Boolean gate independently to a functional bootstrap (FBS); unary gates use linear operations without bootstrapping.
+- `basic`: uses `search` at FBS size 2 and bootstraps after every gate composition; constants and unary gates retain search's simplifications.
 - `naive`: composes gate-input cones using a fixed-radix linear combination. For independent Boolean inputs, this gives power-of-two weights such as `a + 2*b + 4*c + ...`, up to input order.
 - `search`: composes gate-input cones by searching coefficient pairs that minimize a span bound on the FBS input encoding (the paper's greedy heuristic).
 
@@ -43,7 +43,7 @@ coefficient vector, `sum_i(c_i²)`, to `N`. This limit is separate from search's
 multivalue-table tie-breaker.
 For `naive` and `search`, valid negacyclic test vectors can have
 up to `2p` entries; `--strict-fbs-size` limits them to `p`. The `basic` policy
-uses per-gate LUTs and does not enforce these composition-size limits. Run
+always uses `p=2`, with the same negacyclic and strict-size rules. Run
 `target/release/fbs-map --help` for all controls.
 
 The mapper runs once with the topological order encoded in the circuit.
