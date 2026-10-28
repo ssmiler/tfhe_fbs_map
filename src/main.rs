@@ -51,6 +51,14 @@ fn verbosity_level(verbosity: usize) -> log::LevelFilter {
     }
 }
 
+/// Allowed LUT span relative to the FBS size.
+#[derive(Debug, PartialEq, Eq)]
+enum FbsRange {
+    Strict,
+    Negacyclic,
+    Extended,
+}
+
 /// Validated command-line settings for one mapping run.
 #[derive(Debug)]
 struct Arguments {
@@ -58,7 +66,7 @@ struct Arguments {
     input_type: String,
     mapper: String,
     fbs_size: usize,
-    strict_fbs_size: bool,
+    fbs_range: FbsRange,
     max_tt_size: usize,
     max_norm2: Option<u128>,
     trials: usize,
@@ -69,6 +77,20 @@ struct Arguments {
     verbosity: usize,
     output: Option<PathBuf>,
     output_lbf: Option<PathBuf>,
+}
+
+impl Arguments {
+    // Compute the configured maximum LUT span.
+    fn max_fbs_size(&self) -> Result<usize, String> {
+        match self.fbs_range {
+            FbsRange::Strict => Ok(self.fbs_size),
+            FbsRange::Negacyclic => self
+                .fbs_size
+                .checked_mul(2)
+                .ok_or_else(|| "FBS size is too large".to_owned()),
+            FbsRange::Extended => Ok(i64::MAX as usize),
+        }
+    }
 }
 
 // Initialize logging, run the mapper, and translate errors to an exit status.
@@ -88,14 +110,7 @@ fn run() -> Result<(), String> {
     let arguments = parse_arguments()?;
     log::set_max_level(verbosity_level(arguments.verbosity));
     let bit_circuit = parse_file(&arguments.filename, &arguments.input_type)?;
-    let max_fbs_size = if arguments.strict_fbs_size {
-        arguments.fbs_size
-    } else {
-        arguments
-            .fbs_size
-            .checked_mul(2)
-            .ok_or_else(|| "FBS size is too large".to_owned())?
-    };
+    let max_fbs_size = arguments.max_fbs_size()?;
     let coefficient_policy = match arguments.mapper.as_str() {
         "basic" => CoefficientPolicy::Basic,
         "naive" => CoefficientPolicy::Naive,
@@ -177,14 +192,14 @@ fn run() -> Result<(), String> {
         stats.output_count,
         stats.linear_count,
         stats.bootstrap_count,
-        lut_circuit.execution_fbs_size(arguments.strict_fbs_size),
+        lut_circuit.execution_fbs_size(arguments.fbs_range == FbsRange::Strict),
         stats.max_lut_size,
         stats.max_norm2,
         escape_single_quotes(&arguments.filename.to_string_lossy()),
         arguments.fbs_size,
         arguments.mapper,
         python_bool(arguments.multioutput_fbs),
-        python_bool(arguments.strict_fbs_size),
+        python_bool(arguments.fbs_range == FbsRange::Strict),
         arguments.max_tt_size,
         max_fbs_size,
         arguments
@@ -242,7 +257,7 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
     let mut mapper = "search".to_owned();
     let mut input_type = "auto".to_owned();
     let mut fbs_size = 3usize;
-    let mut strict_fbs_size = false;
+    let mut fbs_range = FbsRange::Extended;
     let mut max_tt_size = 16usize;
     let mut max_norm2 = None;
     let mut trials = 0usize;
@@ -262,7 +277,19 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
             }
             "--mapper" => mapper = next_value(&mut arguments, "--mapper")?,
             "--fbs-size" | "--fbs_size" => fbs_size = parse_value(&mut arguments, &argument)?,
-            "--strict-fbs-size" | "--strict_fbs_size" => strict_fbs_size = true,
+            "--fbs-range" | "--fbs_range" => {
+                let value = next_value(&mut arguments, &argument)?;
+                fbs_range = match value.as_str() {
+                    "strict" => FbsRange::Strict,
+                    "2p" => FbsRange::Negacyclic,
+                    "extended" => FbsRange::Extended,
+                    _ => {
+                        return Err(format!(
+                            "unknown FBS range '{value}'; expected strict, 2p, or extended"
+                        ));
+                    }
+                };
+            }
             "--max-tt-size" | "--max_tt_size" => {
                 max_tt_size = parse_value(&mut arguments, &argument)?
             }
@@ -306,13 +333,16 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
     if exclude_input_order && trials == 0 {
         return Err("--exclude-input-order requires at least one random trial".to_owned());
     }
+    if mapper == "naive" && fbs_range == FbsRange::Extended {
+        return Err("the naive mapper requires --fbs-range strict or 2p".to_owned());
+    }
 
     Ok(Arguments {
         filename: filename.ok_or_else(|| "missing input circuit (try --help)".to_owned())?,
         input_type,
         mapper,
         fbs_size,
-        strict_fbs_size,
+        fbs_range,
         max_tt_size,
         max_norm2,
         trials,
@@ -358,7 +388,7 @@ Options:
   --mapper <NAME>          basic, naive, or search (default: search)
   --type <FORMAT>          auto, blif, bench, or bristol (default: auto)
   --fbs-size <P>           FBS plaintext size (default: 3)
-  --strict-fbs-size        Disable the negacyclic extension from p to 2p
+  --fbs-range <MODE>       strict (p), 2p, or extended (default: extended; unavailable for naive)
   --max-tt-size <N>        Maximum cone support before forced bootstrap (default: 16)
   --max-norm2 <N>          Maximum sum of squared linear-combination coefficients
   --trials <N>             Add N random-order mappings (default: 0)
@@ -485,6 +515,72 @@ mod tests {
         .unwrap();
         assert_eq!(arguments.trials, 2);
         assert!(arguments.exclude_input_order);
+    }
+
+    #[test]
+    fn lut_span_range_selects_the_expected_limit() {
+        let parse = |args: &[&str]| {
+            parse_arguments_from(args.iter().map(|argument| (*argument).to_owned())).unwrap()
+        };
+        assert_eq!(
+            parse(&["circuit.blif"]).max_fbs_size().unwrap(),
+            i64::MAX as usize
+        );
+        assert_eq!(
+            parse(&["--fbs-size", "3", "--fbs-range", "2p", "circuit.blif"])
+                .max_fbs_size()
+                .unwrap(),
+            6
+        );
+        assert_eq!(
+            parse(&["--fbs-size", "3", "--fbs-range", "strict", "circuit.blif"])
+                .max_fbs_size()
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            parse(&["--fbs-range", "extended", "circuit.blif"])
+                .max_fbs_size()
+                .unwrap(),
+            i64::MAX as usize
+        );
+        assert!(
+            parse_arguments_from(
+                ["--fbs-range", "invalid", "circuit.blif"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn naive_mapper_requires_a_bounded_fbs_range() {
+        for args in [
+            vec!["--mapper", "naive", "circuit.blif"],
+            vec![
+                "--mapper",
+                "naive",
+                "--fbs-range",
+                "extended",
+                "circuit.blif",
+            ],
+        ] {
+            assert_eq!(
+                parse_arguments_from(args.into_iter().map(str::to_owned)).unwrap_err(),
+                "the naive mapper requires --fbs-range strict or 2p"
+            );
+        }
+        for range in ["strict", "2p"] {
+            assert!(
+                parse_arguments_from(
+                    ["--mapper", "naive", "--fbs-range", range, "circuit.blif"]
+                        .into_iter()
+                        .map(str::to_owned)
+                )
+                .is_ok()
+            );
+        }
     }
 
     #[test]

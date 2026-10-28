@@ -41,8 +41,10 @@ bootstrap boundaries, and limits.
 Use `--max-norm2 N` to limit the squared Euclidean norm of the linear-combination
 coefficient vector, `sum_i(c_i²)`, to `N`. This limit is separate from search's
 multivalue-table tie-breaker.
-For `naive` and `search`, valid negacyclic test vectors can have
-up to `2p` entries; `--strict-fbs-size` limits them to `p`. The `basic` policy
+For `search`, valid negacyclic test vectors can span repeated `2p` periods
+by default; `--fbs-range 2p` limits them to `2p`, and `--fbs-range strict`
+limits them to `p`. The `naive` mapper requires one of these two limits.
+The `basic` policy
 always uses `p=2`, with the same negacyclic and strict-size rules. Run
 `target/release/fbs-map --help` for all controls.
 
