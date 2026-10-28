@@ -9,7 +9,6 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CoefficientPolicy {
     Basic,
-    Naive,
     MinSpan,
 }
 
@@ -826,11 +825,6 @@ impl Mapper {
         truth_table: &[u8],
         cache: &mut CandidateCache,
     ) -> Option<Candidate> {
-        if self.config.coefficient_policy == CoefficientPolicy::Naive {
-            let scales = (right.span() as i64, 1);
-            return self.make_candidate(left, right, xy, truth_table, scales);
-        }
-
         if self.config.multioutput_fbs {
             return self.search_candidate(environment, left, right, xy, truth_table);
         }
@@ -1536,11 +1530,7 @@ mod tests {
             -1 1
             .end
         "#;
-        for policy in [
-            CoefficientPolicy::Basic,
-            CoefficientPolicy::Naive,
-            CoefficientPolicy::MinSpan,
-        ] {
+        for policy in [CoefficientPolicy::Basic, CoefficientPolicy::MinSpan] {
             let (bit, lut) = map_source(source, 3, policy);
             assert_equivalent(&bit, &lut);
         }

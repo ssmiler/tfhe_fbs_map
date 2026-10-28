@@ -73,7 +73,7 @@ def format_result_table(df):
         if "avg." in df.index and label in ("#gates", "#boots.", "FBS size"):
             formatted.loc["avg.", column] = ""
     prefix, suffix = ("$", "\\%$") if args.table_format == "latex" else ("", "%")
-    for mapper in ("naive", "search"):
+    for mapper in ("search",):
         count_column = (mapper, "\\#boots.")
         decrease_column = (mapper, "decrease")
         cost_column = (mapper, "cost")
@@ -132,7 +132,7 @@ def f1(df):
 
 
 def f2(df):
-    # reference cost, naive cost, search cost
+    # reference cost and search cost
     df1 = df
     t_ref = df1.loc[df1.mapper == "basic", ["total_cost", "nb_bootstrap", "bench"]].set_index("bench")
 
@@ -146,21 +146,16 @@ def f2(df):
         return t
 
     df1 = df
-    df1 = df1[df1.mapper == "naive"]
-    t_naive = g(df1)
-    t_naive.columns = pd.MultiIndex.from_tuples(it.product(["naive"], t_naive.columns))
-
-    df1 = df
     df1 = df1[df1.mapper == "search"]
     t_search = g(df1)
     t_search.columns = pd.MultiIndex.from_tuples(it.product(["search"], t_search.columns))
 
-    df1 = pd.concat([t_naive, t_search], axis = 1)
+    df1 = t_search
     return df1
 
 
 def f2b(df):
-    # reference cost, naive cost, search cost
+    # reference cost and search cost
     df1 = df
     t_ref = df1.loc[df1.mapper == "basic", ["total_cost", "nb_bootstrap", "bench"]].set_index("bench")
 
@@ -174,22 +169,17 @@ def f2b(df):
         return t
 
     df1 = df
-    df1 = df1[df1.mapper == "naive"]
-    t_naive = g(df1)
-    t_naive.columns = pd.MultiIndex.from_tuples(it.product(["naive"], t_naive.columns))
-
-    df1 = df
     df1 = df1[df1.mapper == "search"]
     t_search = g(df1)
     t_search.columns = pd.MultiIndex.from_tuples(it.product(["search"], t_search.columns))
 
-    df1 = pd.concat([t_naive, t_search], axis = 1)
+    df1 = t_search
     df1.insert(0, ("", "\\#gates"), t_ref["nb_bootstrap"])
     return df1
 
 
 def f4(df):
-    # reference cost, naive cost, search cost
+    # reference cost and search cost
     df1 = df
     t_ref = df1.loc[df1.mapper == "basic", ["nb_bootstrap", "bench"]].set_index("bench")
 
@@ -201,12 +191,6 @@ def f4(df):
         t = t[["nb_bootstrap", "decrease", "ratio_boots", "FBS size"]].copy()
         t.columns = ["\\#boots.", "decrease", "speedup", "FBS size"]
         return t
-
-    # df1 = df
-    # df1 = df1[df1.mapper == "naive"]
-    # df1 = df1[df1.execution_fbs_size <= 32]
-    # t_naive = g(df1)
-    # t_naive.columns = pd.MultiIndex.from_tuples(it.product(["naive"], t_naive.columns))
 
     df1 = df
     df1 = df1[df1.mapper == "search"]
@@ -228,10 +212,6 @@ bench_arith = ["adder", "bar", "div", "hyp", "log2",
 bench_ctrl = ["arbiter", "cavlc", "ctrl", "dec", "i2c",
               "int2float", "mem_ctrl", "priority", "router", "voter"]
 
-e = df[df.mapper == "basic"].copy()
-e.mapper = "naive"
-df = pd.concat((df, e))
-
 df1 = f2b(df)
 df1 = df1.loc[bench_arith + bench_ctrl]
 df1.index = format_benchmark_index(df1.index)
@@ -244,12 +224,6 @@ print_table(format_result_table(df1))
 # epfl timings
 
 # Execution time (ms) divided by the number of input circuit gates for each FBS size
-df1 = df
-df1 = df1[df1.mapper == "naive"]
-df1 = df1[df1.bench.isin(bench_arith + bench_ctrl)]
-d1 = df1.groupby("fbs_size").apply(lambda d: (d.time / d.nb_bootstrap.iloc[0]).mean(), include_groups=False)*1000
-plt.plot(d1.index, d1.values, ".-", label="naive")
-
 df1 = df
 df1 = df1[df1.mapper == "search"]
 df1 = df1[df1.bench.isin(bench_arith + bench_ctrl)]
@@ -351,7 +325,7 @@ df1 = df
 df1 = df1[df1.bench == "aes_128"]
 df1 = df1[df1.mapper == "search"]
 df1 = df1[df1.execution_fbs_size <= 16]
-d = df1[df1.strict_fbs_size == False].sort_values("execution_fbs_size")
+d = df1[df1.fbs_range != "p"].sort_values("execution_fbs_size")
 fig, ax1 = plt.subplots()
 ax1.set_xlabel('Execution FBS size (p)')
 ax1.set_ylabel('number of bootstraps', color='b')

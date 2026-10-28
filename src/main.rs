@@ -59,6 +59,17 @@ enum FbsRange {
     Extended,
 }
 
+impl FbsRange {
+    // Return the command-line name of the range.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Strict => "p",
+            Self::Negacyclic => "2p",
+            Self::Extended => "ext",
+        }
+    }
+}
+
 /// Validated command-line settings for one mapping run.
 #[derive(Debug)]
 struct Arguments {
@@ -113,7 +124,6 @@ fn run() -> Result<(), String> {
     let max_fbs_size = arguments.max_fbs_size()?;
     let coefficient_policy = match arguments.mapper.as_str() {
         "basic" => CoefficientPolicy::Basic,
-        "naive" => CoefficientPolicy::Naive,
         "search" => CoefficientPolicy::MinSpan,
         mapper => return Err(format!("unknown mapper '{mapper}'")),
     };
@@ -186,8 +196,8 @@ fn run() -> Result<(), String> {
     println!(
         "{{'nb_inp': {}, 'nb_out': {}, 'nb_linprod': {}, 'nb_bootstrap': {}, 'execution_fbs_size': {}, \
          'max_lut_size': {}, 'norm2_linprod': {}, 'filename': '{}', 'fbs_size': {}, \
-         'mapper': '{}', 'multioutput_fbs': {}, 'strict_fbs_size': {}, 'max_tt_size': {}, 'max_fbs_size': {}, \
-         'max_norm2': {}, 'trials': {}, 'exclude_input_order': {}, 'time': {:.9}}}",
+         'mapper': '{}', 'multioutput_fbs': {}, 'fbs_range': '{}', 'max_tt_size': {}, \
+         'max_norm2': {}, 'trials': {}, 'exclude_input_order': {}, 'seed': {}, 'time': {:.9}}}",
         stats.input_count,
         stats.output_count,
         stats.linear_count,
@@ -199,15 +209,15 @@ fn run() -> Result<(), String> {
         arguments.fbs_size,
         arguments.mapper,
         python_bool(arguments.multioutput_fbs),
-        python_bool(arguments.fbs_range == FbsRange::Strict),
+        arguments.fbs_range.as_str(),
         arguments.max_tt_size,
-        max_fbs_size,
         arguments
             .max_norm2
             .map(|value| value.to_string())
             .unwrap_or_else(|| "None".to_owned()),
         arguments.trials,
         python_bool(arguments.exclude_input_order),
+        arguments.seed,
         total_duration,
     );
     Ok(())
@@ -280,12 +290,12 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
             "--fbs-range" | "--fbs_range" => {
                 let value = next_value(&mut arguments, &argument)?;
                 fbs_range = match value.as_str() {
-                    "strict" => FbsRange::Strict,
+                    "p" => FbsRange::Strict,
                     "2p" => FbsRange::Negacyclic,
-                    "extended" => FbsRange::Extended,
+                    "ext" => FbsRange::Extended,
                     _ => {
                         return Err(format!(
-                            "unknown FBS range '{value}'; expected strict, 2p, or extended"
+                            "unknown FBS range '{value}'; expected p, 2p, or ext"
                         ));
                     }
                 };
@@ -333,8 +343,8 @@ fn parse_arguments_from(mut arguments: impl Iterator<Item = String>) -> Result<A
     if exclude_input_order && trials == 0 {
         return Err("--exclude-input-order requires at least one random trial".to_owned());
     }
-    if mapper == "naive" && fbs_range == FbsRange::Extended {
-        return Err("the naive mapper requires --fbs-range strict or 2p".to_owned());
+    if !matches!(mapper.as_str(), "basic" | "search") {
+        return Err(format!("unknown mapper '{mapper}'"));
     }
 
     Ok(Arguments {
@@ -385,10 +395,10 @@ fn print_help() {
 Usage: fbs-map [OPTIONS] <FILE>
 
 Options:
-  --mapper <NAME>          basic, naive, or search (default: search)
+  --mapper <NAME>          basic or search (default: search)
   --type <FORMAT>          auto, blif, bench, or bristol (default: auto)
   --fbs-size <P>           FBS plaintext size (default: 3)
-  --fbs-range <MODE>       strict (p), 2p, or extended (default: extended; unavailable for naive)
+  --fbs-range <MODE>       p, 2p, or ext (default: ext)
   --max-tt-size <N>        Maximum cone support before forced bootstrap (default: 16)
   --max-norm2 <N>          Maximum sum of squared linear-combination coefficients
   --trials <N>             Add N random-order mappings (default: 0)
@@ -533,13 +543,13 @@ mod tests {
             6
         );
         assert_eq!(
-            parse(&["--fbs-size", "3", "--fbs-range", "strict", "circuit.blif"])
+            parse(&["--fbs-size", "3", "--fbs-range", "p", "circuit.blif"])
                 .max_fbs_size()
                 .unwrap(),
             3
         );
         assert_eq!(
-            parse(&["--fbs-range", "extended", "circuit.blif"])
+            parse(&["--fbs-range", "ext", "circuit.blif"])
                 .max_fbs_size()
                 .unwrap(),
             i64::MAX as usize
@@ -555,32 +565,14 @@ mod tests {
     }
 
     #[test]
-    fn naive_mapper_requires_a_bounded_fbs_range() {
-        for args in [
-            vec!["--mapper", "naive", "circuit.blif"],
-            vec![
-                "--mapper",
-                "naive",
-                "--fbs-range",
-                "extended",
-                "circuit.blif",
-            ],
-        ] {
-            assert_eq!(
-                parse_arguments_from(args.into_iter().map(str::to_owned)).unwrap_err(),
-                "the naive mapper requires --fbs-range strict or 2p"
-            );
-        }
-        for range in ["strict", "2p"] {
-            assert!(
-                parse_arguments_from(
-                    ["--mapper", "naive", "--fbs-range", range, "circuit.blif"]
-                        .into_iter()
-                        .map(str::to_owned)
-                )
-                .is_ok()
-            );
-        }
+    fn removed_mapper_is_rejected() {
+        let error = parse_arguments_from(
+            ["--mapper", "naive", "circuit.blif"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert_eq!(error, "unknown mapper 'naive'");
     }
 
     #[test]

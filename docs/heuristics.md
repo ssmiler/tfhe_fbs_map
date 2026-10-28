@@ -1,22 +1,17 @@
 # Rust mapping policies
 
-`fbs-map` exposes the three mapping policies described in [README.md](../README.md).
+`fbs-map` exposes the two mapping policies described in [README.md](../README.md).
 
 - `basic` uses the same coefficient search as `search` at FBS size 2 and
   bootstraps after every gate composition. Constants and unary gates retain
   search's simplifications.
-- `naive` composes gate-input cones with a fixed-radix linear combination,
-  without searching coefficients. For independent Boolean inputs, repeated
-  composition gives power-of-two weights such as `a + 2*b + 4*c + ...`, up to
-  input order. More generally, it combines input encodings `L1` and `L2` as
-  `s2*L1 + L2`, where `s2` is the range span of `L2`.
 - `search` searches coefficient pairs for a valid composition minimizing a
   span bound on the FBS input encoding. This is a greedy local objective, not a
   guarantee of the smallest final circuit or evaluation cost.
 
 ## Bootstrap boundaries
 
-In ordinary `naive` and `search`, shared cones are retained until composition
+In ordinary `search`, shared cones are retained until composition
 requires a bootstrap; fanout alone does not force one. Input cones are ordered
 by span, then squared coefficient norm, with the larger cone first. If
 composition fails, that cone is bootstrapped and composition is retried. The
@@ -25,17 +20,13 @@ also fails. Circuit outputs are bootstrapped eagerly in ordinary mode.
 
 ## Search ranking and linear forms
 
-Ordinary `search` considers combinations `a*L1 + b*L2`. For input spans `s1`
-and `s2`, the inclusive integer coefficient ranges are `a` in `[-s2, s2]` and
-`b` in `[0, s1]` when `s1 >= s2`; otherwise, `a` is in `[0, s2]` and `b` is in
-`[-s1, s1]`. It minimizes the span bound
-`|a|*(s1 - 1) + |b|*(s2 - 1)`, then the squared Euclidean norm of the
-multivalue table: `sum_j(mvt[j]^2)`, including repeated table entries. Equal
-scores prefer descending coefficient pairs. The coefficient norm
-`sum_i(c_i²)` is used separately to order input cones and enforce
-`--max-norm2`; it does not break ordinary search ties. Cache keys retain the
-exact input tables and truth table so symmetry sharing cannot alter these tie
-choices.
+Ordinary `search` considers primitive combinations `a*L1 + b*L2`, with `a`
+in `[0, s2]` and `b` in `[-s1, s1]` for input spans `s1` and `s2`. It
+normalizes the merged coefficients, then minimizes their span, the squared
+multivalue-table norm `sum_j(mvt[j]^2)`, and the squared coefficient norm.
+Remaining ties prefer ascending coefficient pairs. The coefficient norm also
+orders input cones and enforces `--max-norm2`. Cache keys retain the exact
+input values and truth table.
 
 Ordinary linear operations preserve term order and repeated terms when
 flattening. Canonical sorting and coefficient aggregation are retained in
@@ -54,17 +45,17 @@ only concrete `0` and `1` values.
 
 ## Limits and trials
 
-For `naive` and `search`, test vectors can have up to `2p` entries when the
-negacyclic-extension conditions are satisfied; `--strict-fbs-size` limits them
-to `p`. `--max-tt-size` bounds cone support before forced bootstrapping, and
+For `search`, test vectors can span repeated `2p` periods when the
+negacyclic conditions are satisfied; `--fbs-range 2p` limits them to `2p`
+and `--fbs-range p` limits them to `p`. `--max-tt-size` bounds cone support before forced bootstrapping, and
 `--max-norm2 N` limits `sum_i(c_i²)` of candidate cones to `N`. `basic`
 always uses `p=2` regardless of `--fbs-size`, applies the same composition
-limits, and bootstraps each gate before continuing. With `--strict-fbs-size`,
+limits, and bootstraps each gate before continuing. With `--fbs-range p`,
 only two-entry tables are allowed, so some binary functions cannot be mapped.
 
 `--trials N` runs the selected policy once in the circuit's encoded topological
-order, then in `N - 1` deterministic random topological orders derived from
-`--seed`. The best mapping is retained by bootstrap count, then maximum LUT
+order, then in `N` deterministic random topological orders derived from
+`--seed`; `--exclude-input-order` skips the input-order run. The best mapping is retained by bootstrap count, then maximum LUT
 size, maximum reported norm², and linear-operation count. Reported mapping time
 is summed over all trials and excludes parsing, verification, and file output.
 
@@ -79,7 +70,7 @@ Among candidates with the same reuse cost, search minimizes the span bound,
 then the squared multivalue-table norm, then the squared coefficient norm;
 remaining ties prefer ascending coefficient pairs.
 
-In `naive` and `search`, multi-output mode defers eager circuit-output
+In `search`, multi-output mode defers eager circuit-output
 bootstraps. Shared cones remain available until composition requires a
 bootstrap. This can enable further sharing, but the heuristic is not guaranteed
 to find every possible shared encoding.
