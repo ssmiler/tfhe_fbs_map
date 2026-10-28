@@ -1,5 +1,7 @@
 use crate::circuit::{BoolCircuit, BoolNode, BoolWire};
-use crate::lut::{LutCircuit, LutSignal, is_fbs_table_valid};
+use crate::lut::{
+    LutCircuit, LutSignal, is_fbs_table_valid, is_sparse_fbs_table_valid, negacyclic_basis,
+};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -7,7 +9,6 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CoefficientPolicy {
     Basic,
-    Naive,
     MinSpan,
 }
 
@@ -34,7 +35,7 @@ impl Default for MapConfig {
     fn default() -> Self {
         Self {
             fbs_size: 3,
-            max_fbs_size: 6,
+            max_fbs_size: i64::MAX as usize,
             max_truth_table_inputs: 16,
             max_norm2: None,
             coefficient_policy: CoefficientPolicy::MinSpan,
@@ -414,12 +415,8 @@ impl Mapper {
         if config.fbs_size < 2 {
             return Err("FBS size must be at least 2".to_owned());
         }
-        let negacyclic_limit = config
-            .fbs_size
-            .checked_mul(2)
-            .ok_or_else(|| "FBS size is too large".to_owned())?;
-        if config.max_fbs_size < config.fbs_size || config.max_fbs_size > negacyclic_limit {
-            return Err("maximum FBS size must be between p and 2p".to_owned());
+        if config.max_fbs_size < config.fbs_size {
+            return Err("maximum FBS size must be at least p".to_owned());
         }
         if config.max_fbs_size > i64::MAX as usize {
             return Err("FBS size exceeds the supported integer range".to_owned());
@@ -828,11 +825,6 @@ impl Mapper {
         truth_table: &[u8],
         cache: &mut CandidateCache,
     ) -> Option<Candidate> {
-        if self.config.coefficient_policy == CoefficientPolicy::Naive {
-            let scales = (right.span() as i64, 1);
-            return self.make_candidate(left, right, xy, truth_table, scales);
-        }
-
         if self.config.multioutput_fbs {
             return self.search_candidate(environment, left, right, xy, truth_table);
         }
@@ -1101,62 +1093,40 @@ impl Mapper {
 
     // Test whether a full multivalue table admits the requested Boolean LUT.
     fn is_lut_valid(&self, truth_table: &[u8], multivalue_table: &[i64]) -> bool {
-        self.is_lut_valid_with_scratch(truth_table, multivalue_table, &mut Vec::new())
+        let mut known = Vec::new();
+        self.prepare_known(truth_table, multivalue_table, &mut known)
+            .is_some()
+            && self.is_known_lut_valid(&known)
     }
 
-    // Validate a LUT using caller-provided scratch storage.
-    fn is_lut_valid_with_scratch(
-        &self,
-        truth_table: &[u8],
-        multivalue_table: &[i64],
-        known: &mut Vec<u8>,
-    ) -> bool {
-        if truth_table.len() != multivalue_table.len() || multivalue_table.is_empty() {
-            return false;
+    // Construct a sparse table, rejecting invalid values and conflicting outputs.
+    fn prepare_known(&self, truth: &[u8], values: &[i64], known: &mut Vec<u8>) -> Option<()> {
+        if truth.len() != values.len() {
+            return None;
         }
-        let minimum = *multivalue_table.iter().min().unwrap();
-        let maximum = *multivalue_table.iter().max().unwrap();
-        let Some(size) = maximum
-            .checked_sub(minimum)
-            .and_then(|span| span.checked_add(1))
-            .and_then(|size| usize::try_from(size).ok())
-        else {
-            return false;
-        };
+        let minimum = *values.iter().min()?;
+        let maximum = *values.iter().max()?;
+        let size = usize::try_from(maximum.checked_sub(minimum)?.checked_add(1)?).ok()?;
         if size > self.config.max_fbs_size {
-            return false;
+            return None;
         }
         known.clear();
         known.resize(size, 2);
-        for (&truth, &value) in truth_table.iter().zip(multivalue_table) {
-            let entry = &mut known[(value - minimum) as usize];
+        for (&truth, &value) in truth.iter().zip(values) {
+            let index = usize::try_from(value.checked_sub(minimum)?).ok()?;
+            let entry = known.get_mut(index)?;
             if truth > 1 || (*entry != 2 && *entry != truth) {
-                return false;
+                return None;
             }
             *entry = truth;
         }
-        self.is_known_lut_valid(known)
+        Some(())
     }
 
     // Test whether known sparse LUT entries admit a valid completion.
     fn is_known_lut_valid(&self, known: &[u8]) -> bool {
-        let size = known.len();
-        if size <= self.config.fbs_size {
-            return true;
-        }
-
-        let mut antipodal = true;
-        let mut all_zero = true;
-        let mut all_one = true;
-        for (&left, &right) in known[..size - self.config.fbs_size]
-            .iter()
-            .zip(&known[self.config.fbs_size..])
-        {
-            antipodal &= left == 2 || right == 2 || left != right;
-            all_zero &= left != 1 && right != 1;
-            all_one &= left != 0 && right != 0;
-        }
-        antipodal || all_zero || all_one
+        known.len() <= self.config.max_fbs_size
+            && is_sparse_fbs_table_valid(known, self.config.fbs_size)
     }
 
     // Build the bootstrap table for one cone truth table.
@@ -1175,43 +1145,27 @@ impl Mapper {
         truth_table: &[u8],
         multivalue_table: &[i64],
     ) -> Option<Vec<u8>> {
-        if truth_table.len() != multivalue_table.len() {
-            return None;
-        }
-        let minimum = *multivalue_table.iter().min()?;
-        let maximum = *multivalue_table.iter().max()?;
-        let size = usize::try_from(maximum - minimum + 1).ok()?;
-        if size > self.config.max_fbs_size {
-            return None;
-        }
-        let mut known = vec![None; size];
-        for (value, truth) in multivalue_table.iter().zip(truth_table) {
-            let index = usize::try_from(*value - minimum).ok()?;
-            if *truth > 1 || known[index].is_some_and(|previous| previous != *truth) {
-                return None;
-            }
-            known[index] = Some(*truth);
-        }
+        let mut known = Vec::new();
+        self.prepare_known(truth_table, multivalue_table, &mut known)?;
+        let size = known.len();
+        let mut table = vec![0; size];
         for missing in [0, 1] {
-            let table: Vec<_> = known.iter().map(|value| value.unwrap_or(missing)).collect();
+            for (entry, &value) in table.iter_mut().zip(&known) {
+                *entry = if value == 2 { missing } else { value };
+            }
             if self.is_test_vector_valid(&table) {
                 return Some(table);
             }
         }
 
-        let overlap = size.checked_sub(self.config.fbs_size)?;
-        let mut table: Vec<_> = known.iter().map(|value| value.unwrap_or(0)).collect();
-        for index in 0..overlap {
-            let opposite = index + self.config.fbs_size;
-            match (known[index], known[opposite]) {
-                (Some(left), Some(right)) if left != right => {}
-                (Some(_), Some(_)) => return None,
-                (Some(left), None) => table[opposite] = 1 - left,
-                (None, Some(right)) => table[index] = 1 - right,
-                (None, None) => table[opposite] = 1,
-            }
+        let basis = negacyclic_basis(&known, self.config.fbs_size)?;
+        for (index, entry) in table.iter_mut().enumerate() {
+            let value = basis[index % self.config.fbs_size];
+            *entry =
+                (if value == 2 { 0 } else { value }) ^ ((index / self.config.fbs_size) % 2) as u8;
         }
-        self.is_test_vector_valid(&table).then_some(table)
+        debug_assert!(self.is_test_vector_valid(&table));
+        Some(table)
     }
 
     // Check one completed lookup table against negacyclic FBS constraints.
@@ -1576,11 +1530,7 @@ mod tests {
             -1 1
             .end
         "#;
-        for policy in [
-            CoefficientPolicy::Basic,
-            CoefficientPolicy::Naive,
-            CoefficientPolicy::MinSpan,
-        ] {
+        for policy in [CoefficientPolicy::Basic, CoefficientPolicy::MinSpan] {
             let (bit, lut) = map_source(source, 3, policy);
             assert_equivalent(&bit, &lut);
         }
@@ -2123,7 +2073,11 @@ mod tests {
 
     #[test]
     fn candidate_rejections_stop_before_row_validation() {
-        let mapper = Mapper::new(MapConfig::default()).unwrap();
+        let mapper = Mapper::new(MapConfig {
+            max_fbs_size: 6,
+            ..MapConfig::default()
+        })
+        .unwrap();
         let left = Cone::identity(1);
         let right = Cone::identity(2);
         let (xy, truth) = cone_composition_tables(&left, &right, &[0, 0, 0, 1]).unwrap();
@@ -2240,15 +2194,50 @@ mod tests {
     }
 
     #[test]
+    fn validates_and_completes_repeated_negacyclic_periods() {
+        let mapper = Mapper::new(MapConfig {
+            fbs_size: 2,
+            max_fbs_size: 12,
+            ..MapConfig::default()
+        })
+        .unwrap();
+        let table = [0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0];
+        assert!(mapper.is_test_vector_valid(&table));
+        let capped = Mapper::new(MapConfig {
+            fbs_size: 2,
+            max_fbs_size: 4,
+            ..MapConfig::default()
+        })
+        .unwrap();
+        assert!(capped.is_test_vector_valid(&table[..4]));
+        assert!(!capped.is_test_vector_valid(&table));
+        assert!(!capped.is_lut_valid(&[0, 0], &[0, 4]));
+        let mut invalid = table;
+        invalid[8] = 1;
+        assert!(!mapper.is_test_vector_valid(&invalid));
+        assert!(mapper.is_test_vector_valid(&[0; 12]));
+        assert!(mapper.is_test_vector_valid(&[1; 12]));
+        let values = [-3, 0, 2, 8];
+        let truth = [0, 0, 1, 0];
+        assert!(mapper.is_lut_valid(&truth, &values));
+        let completed = mapper.bootstrap_table(&truth, &values).unwrap();
+        assert!(mapper.is_test_vector_valid(&completed));
+        for (&value, &truth) in values.iter().zip(&truth) {
+            assert_eq!(completed[(value + 3) as usize], truth);
+        }
+        assert!(!mapper.is_lut_valid(&[0, 1, 1], &[0, 2, 4]));
+    }
+
+    #[test]
     fn sparse_test_vector_completion_matches_exhaustive_search() {
         for fbs_size in 2..=3 {
             let mapper = Mapper::new(MapConfig {
                 fbs_size,
-                max_fbs_size: 2 * fbs_size,
+                max_fbs_size: 3 * fbs_size,
                 ..MapConfig::default()
             })
             .unwrap();
-            for size in 1..=2 * fbs_size {
+            for size in 1..=3 * fbs_size {
                 for pattern in 0..3usize.pow(size as u32) {
                     let mut pattern = pattern;
                     let known: Vec<_> = (0..size)
@@ -2310,6 +2299,11 @@ mod tests {
         assert!(!mapper.is_lut_valid(&[0], &[0, 1]));
         assert!(!mapper.is_lut_valid(&[2], &[0]));
         assert!(!mapper.is_lut_valid(&[0, 1], &[i64::MIN, i64::MAX]));
+        assert!(
+            mapper
+                .bootstrap_table(&[0, 1], &[i64::MIN, i64::MAX])
+                .is_err()
+        );
         assert!(!mapper.is_lut_valid(&[0, 1], &[0, 0]));
         assert!(mapper.bootstrap_table(&[0, 1], &[0, 0]).is_err());
         assert!(!mapper.is_lut_valid(&[0, 1, 0, 1], &[0, 1, 3, 4]));

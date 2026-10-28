@@ -32,7 +32,6 @@ target/release/fbs-map circuit.blif \
 The available mapping policies are:
 
 - `basic`: uses `search` at FBS size 2 and bootstraps after every gate composition; constants and unary gates retain search's simplifications.
-- `naive`: composes gate-input cones using a fixed-radix linear combination. For independent Boolean inputs, this gives power-of-two weights such as `a + 2*b + 4*c + ...`, up to input order.
 - `search`: composes gate-input cones by searching coefficient pairs that minimize a span bound on the FBS input encoding (the paper's greedy heuristic).
 
 See [mapping-policy details](docs/heuristics.md) for coefficient selection,
@@ -41,8 +40,10 @@ bootstrap boundaries, and limits.
 Use `--max-norm2 N` to limit the squared Euclidean norm of the linear-combination
 coefficient vector, `sum_i(c_i²)`, to `N`. This limit is separate from search's
 multivalue-table tie-breaker.
-For `naive` and `search`, valid negacyclic test vectors can have
-up to `2p` entries; `--strict-fbs-size` limits them to `p`. The `basic` policy
+For `search`, valid negacyclic test vectors can span repeated `2p` periods
+by default; `--fbs-range 2p` limits them to `2p`, and `--fbs-range p`
+limits them to `p`.
+The `basic` policy
 always uses `p=2`, with the same negacyclic and strict-size rules. Run
 `target/release/fbs-map --help` for all controls.
 
@@ -65,7 +66,7 @@ two test vectors.
 The flag also changes mapping decisions: an encoding compatible with an existing
 bootstrap input has zero additional FBS count in the mapper's cost model. A cone
 can be realigned to a compatible existing encoding before bootstrapping. In
-`naive` and `search`, multi-output mode defers eager circuit-output bootstraps;
+`search`, multi-output mode defers eager circuit-output bootstraps;
 shared cones are retained until composition requires a bootstrap. This can
 create further sharing opportunities, but outputs are grouped only when their
 materialized linear inputs coincide.
@@ -166,8 +167,7 @@ See the saved Markdown output in [experiments/results.md](experiments/results.md
 The table summarizes saved runs from `experiments/epfl_agg_est.csv`,
 formatted by `analyse_results.py`.
 
-Each mapper uses the FBS size minimizing estimated evaluation cost: `naive` searches sizes 3–16,
-and `search` searches sizes 2–16. Multi-output
+The search mapper uses the FBS size minimizing estimated evaluation cost over sizes 2–16. Multi-output
 grouping is disabled and negacyclic LUTs up to `2p` are allowed.
 
 `#gates` is the `basic` mapper's bootstrap count at `p=2`, used as the gate-count
@@ -182,26 +182,42 @@ otherwise the FBS-size cell is blank. The average is the arithmetic mean
 of the percentages over all 20 circuits. Costs are Concrete estimates, not
 measured encrypted-execution times.
 
-| bench | #gates | naive cost | naive #boots. | naive FBS size | search cost | search #boots. | search FBS size |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| adder | 1020 | -17% | 764 (-25%) | 3 (4) | -72% | 256 (-75%) | 3 (4) |
-| bar | 3336 |  |  |  | -24% | 1664 (-50%) | 7 (10) |
-| div | 57247 |  |  |  | -30% | 25133 (-56%) | 7 (14) |
-| hyp | 214335 |  |  |  | -40% | 80627 (-62%) | 7 (14) |
-| log2 | 32060 | -4% | 19836 (-38%) | 7 (12) | -38% | 13807 (-57%) | 5 (10) |
-| max | 2865 | -6% | 1781 (-38%) | 7 (8) | -53% | 873 (-70%) | 7 (13) |
-| multiplier | 27062 | -2% | 17068 (-37%) | 7 (12) | -51% | 9127 (-66%) | 5 (10) |
-| sin | 5416 | -3% | 3392 (-37%) | 7 (12) | -39% | 2195 (-59%) | 6 (12) |
-| sqrt | 24618 |  |  |  | -54% | 7405 (-70%) | 6 (11) |
-| square | 18484 |  |  |  | -35% | 8260 (-55%) | 5 (10) |
-| arbiter | 11839 | -20% | 6544 (-45%) | 5 (8) | -48% | 4259 (-64%) | 5 (8) |
-| cavlc | 693 | -2% | 449 (-35%) | 7 (8) | -36% | 284 (-59%) | 7 (13) |
-| ctrl | 174 | -3% | 109 (-37%) | 7 (8) | -47% | 56 (-68%) | 8 (13) |
-| dec | 304 |  |  |  |  |  |  |
-| i2c | 1342 | -2% | 870 (-35%) | 7 (8) | -35% | 562 (-58%) | 7 (13) |
-| int2float | 260 | -10% | 155 (-40%) | 7 (8) | -50% | 84 (-68%) | 7 (13) |
-| mem_ctrl | 46836 | -5% | 28686 (-39%) | 7 (12) | -31% | 20950 (-55%) | 7 (14) |
-| priority | 978 |  |  |  | -40% | 387 (-60%) | 6 (11) |
-| router | 257 | -22% | 132 (-49%) | 7 (8) | -42% | 94 (-63%) | 7 (14) |
-| voter | 13758 | -7% | 8444 (-39%) | 7 (8) | -44% | 4872 (-65%) | 7 (14) |
-| avg. |  | -5% | (-25%) |  | -40% | (-59%) |  |
+| bench | #gates | search cost | search #boots. | search FBS size |
+| --- | --- | --- | --- | --- |
+| adder | 1020 | -72% | 256 (-75%) | 3 (4) |
+| bar | 3336 | -24% | 1664 (-50%) | 7 (10) |
+| div | 57247 | -30% | 25133 (-56%) | 7 (14) |
+| hyp | 214335 | -37% | 93843 (-56%) | 5 (10) |
+| log2 | 32060 | -38% | 13807 (-57%) | 5 (10) |
+| max | 2865 | -53% | 873 (-70%) | 7 (13) |
+| multiplier | 27062 | -50% | 9113 (-66%) | 5 (16) |
+| sin | 5416 | -36% | 2412 (-55%) | 5 (10) |
+| sqrt | 24618 | -54% | 7405 (-70%) | 6 (11) |
+| square | 18484 | -35% | 8260 (-55%) | 5 (10) |
+| arbiter | 11839 | -48% | 4259 (-64%) | 5 (8) |
+| cavlc | 693 | -36% | 284 (-59%) | 7 (13) |
+| ctrl | 174 | -47% | 56 (-68%) | 8 (13) |
+| dec | 304 |  |  |  |
+| i2c | 1342 | -35% | 562 (-58%) | 7 (13) |
+| int2float | 260 | -50% | 84 (-68%) | 7 (13) |
+| mem_ctrl | 46836 | -30% | 22753 (-51%) | 5 (10) |
+| priority | 978 | -40% | 387 (-60%) | 6 (11) |
+| router | 257 | -42% | 94 (-63%) | 7 (14) |
+| voter | 13758 | -44% | 4872 (-65%) | 7 (14) |
+| avg. |  | -40% | (-58%) |  |
+
+### Comparison with Bon et al.
+
+Bon, Pointcheval, and Rivain, [*Optimized Homomorphic Evaluation of Boolean Functions*](https://eprint.iacr.org/2023/1589), IACR ePrint 2023/1589.
+
+The following comparison uses the saved search results in
+`experiments/generated_agg_est.csv` and the Bon et al. values in
+`analyse_results.py`. Our FBS size is shown as execution size (maximum LUT
+size). Speedup is the ratio of estimated Bon et al. cost to estimated search
+cost; it is not a measurement of encrypted execution time.
+
+| Circuit | Bon et al. #FBS | Bon et al. FBS size | Search #FBS | Search FBS size | Estimated speedup |
+| --- | --- | --- | --- | --- | --- |
+| SIMON | 1 | 9 | 1 | 2 (9) | 1.57× |
+| ASCON | 5 | 17 | 10 | 2 (7) | 1.25× |
+| AES s-box | 36 | 11 | 48 | 2 (11) | 1.62× |

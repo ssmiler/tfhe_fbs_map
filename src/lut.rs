@@ -47,17 +47,62 @@ impl MappingStats {
 
 /// Check a concrete Boolean table against the negacyclic FBS rules.
 pub(crate) fn is_fbs_table_valid(table: &[u8], size: usize) -> bool {
+    if size == 0 || table.iter().any(|value| *value > 1) {
+        return false;
+    }
     if table.len() <= size {
         return true;
     }
-    let overlap = table.len() - size;
-    if overlap > size {
+    let (zero, one, complementary) = overlap_properties(table, size);
+    zero || one || complementary
+}
+
+// Return base-period values for a sparse negacyclic table; 2 means unknown.
+pub(crate) fn negacyclic_basis(known: &[u8], size: usize) -> Option<Vec<u8>> {
+    if size == 0 {
+        return None;
+    }
+    let mut basis = vec![2; size.min(known.len())];
+    for (index, &value) in known.iter().enumerate() {
+        if value > 2 {
+            return None;
+        }
+        if value == 2 {
+            continue;
+        }
+        let expected = value ^ ((index / size) % 2) as u8;
+        let entry = &mut basis[index % size];
+        if *entry != 2 && *entry != expected {
+            return None;
+        }
+        *entry = expected;
+    }
+    Some(basis)
+}
+
+// Check whether unknown entries can satisfy a negacyclic or constant overlap.
+pub(crate) fn is_sparse_fbs_table_valid(known: &[u8], size: usize) -> bool {
+    if size == 0 || known.iter().any(|value| *value > 2) {
         return false;
     }
-    let pairs = || table[..overlap].iter().zip(&table[size..]);
-    pairs().all(|(left, right)| left != right)
-        || pairs().all(|(left, right)| *left == 0 && *right == 0)
-        || pairs().all(|(left, right)| *left == 1 && *right == 1)
+    if known.len() <= size {
+        return true;
+    }
+    let (zero, one, _) = overlap_properties(known, size);
+    zero || one || negacyclic_basis(known, size).is_some()
+}
+
+// Summarize the constant and complementary conditions on overlapping entries.
+fn overlap_properties(table: &[u8], size: usize) -> (bool, bool, bool) {
+    let mut zero = true;
+    let mut one = true;
+    let mut complementary = true;
+    for (&left, &right) in table[..table.len() - size].iter().zip(&table[size..]) {
+        zero &= left != 1 && right != 1;
+        one &= left != 0 && right != 0;
+        complementary &= left < 2 && right < 2 && left != right;
+    }
+    (zero, one, complementary)
 }
 
 /// An interned circuit of inputs, linear combinations, and bootstraps.
@@ -147,7 +192,7 @@ impl LutCircuit {
             return maximum;
         }
         // Validity can have gaps, so neither binary search nor per-table minima suffice.
-        (maximum.div_ceil(2).max(2)..=maximum)
+        (2..=maximum)
             .find(|&size| tables.iter().all(|table| is_fbs_table_valid(table, size)))
             .unwrap()
     }
@@ -772,6 +817,14 @@ mod tests {
         let circuit = circuit_with_tables(&[&table, &[1, 1, 1, 1, 0, 0, 0, 0]]);
         // The individual minima are 3 and 4, but their first common valid size is 5.
         assert_eq!(circuit.execution_fbs_size(false), 5);
+        assert_eq!(circuit.execution_fbs_size(true), 8);
+    }
+
+    #[test]
+    fn execution_size_checks_repeated_periods() {
+        let table = [0, 0, 1, 1, 0, 0, 1, 1];
+        let circuit = circuit_with_tables(&[&table]);
+        assert_eq!(circuit.execution_fbs_size(false), 2);
         assert_eq!(circuit.execution_fbs_size(true), 8);
     }
 

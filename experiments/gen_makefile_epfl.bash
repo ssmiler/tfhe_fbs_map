@@ -64,7 +64,7 @@ do
 
     for FBS_SIZE in $FBS_SIZES
     do
-        for MAPPER in "naive" "search"
+        for MAPPER in "search"
         do
             run_bench $BLIF $BENCH $FBS_SIZE $MAPPER >> Makefile
         done
